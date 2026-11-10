@@ -1,0 +1,5 @@
+# built from the game's own files on first start (Ubisoft texts, ~4 MB)
+namen_de.json
+# personal dark-mode choice
+einstellungen.json
+__pycache__/
