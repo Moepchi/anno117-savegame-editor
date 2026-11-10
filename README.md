@@ -1,23 +1,27 @@
 # Anno 117 Savegame-Editor
 
+[Deutsch](#deutsch) · [English](#english)
+
+## Deutsch
+
 Kleiner Desktop-Editor (Python/tkinter) für Spielstände von *Anno 117 – Pax Romana*:
 
 - Denare, Baurechte und Auxiliareserven
 - Lager jeder eigenen Insel (Latium, Albion, Aegyptus)
-- Spieleinstellungen inkl. DLC-Optionen (z. B. Vulkanaktivität), mit den Texten aus dem Spiel
+- Spieleinstellungen inkl. DLC-Optionen (z. B. Vulkanaktivität), mit den Texten und der Gliederung des Spielmenüs
 - Deutsch/Englisch und Hell/Dunkel umschaltbar
 
 Gespeichert wird immer als **neue Datei**, das Original bleibt unangetastet.
 
-## Start
+### Start
 
-`Anno117-Savegame-Editor.exe` herunterladen und starten, eine Installation ist nicht nötig. Windows warnt beim ersten Start vor unbekannten Programmen („Weitere Informationen“ → „Trotzdem ausführen“), weil die Datei nicht signiert ist.
+`Anno117-Savegame-Editor.exe` unter [Releases](../../releases) herunterladen und starten, eine Installation ist nicht nötig. Windows warnt beim ersten Start vor unbekannten Programmen („Weitere Informationen“ → „Trotzdem ausführen“), weil die Datei nicht signiert ist.
 
-Beim ersten Start fragt der Editor nach dem Installationsordner von Anno 117 und dem Ordner mit den Spielständen (meist `Dokumente\Anno 117 - Pax Romana`). Seine Einstellungen und die aus dem Spiel gelesenen Namen legt er in `%APPDATA%\Anno117 Savegame-Editor` ab.
+Beim ersten Start fragt der Editor nach dem Installationsordner von Anno 117 und dem Ordner mit den Spielständen (meist `Dokumente\Anno 117 - Pax Romana`). Aus dem Spielordner liest er nur die Namen und Texte, er schreibt dort nichts hinein. Seine Einstellungen und die aus dem Spiel gelesenen Namen legt er in `%APPDATA%\Anno117 Savegame-Editor` ab.
 
 Mit installiertem Python 3 (nur Standardbibliothek) geht auch ein Doppelklick auf `savegame_editor.pyw`.
 
-## Selbst bauen und prüfen
+### Selbst bauen und prüfen
 
 ```
 pip install pyinstaller
@@ -30,6 +34,42 @@ python savegame_editor.pyw --selftest "<Spielstand>.a8s"
 ```
 prüft, dass ein Spielstand byte-identisch neu geschrieben wird (der Spielordner muss schon gewählt sein).
 
-## Formate
+### Formate
 
 Das Dateiformat (RDA-Container, FileDB, Lager-Codierung, Einstellungen) ist in [STAND.md](STAND.md) beschrieben. `tools/` enthält die Lese-Prototypen aus der Analyse.
+
+## English
+
+Small desktop editor (Python/tkinter) for *Anno 117 – Pax Romana* save games:
+
+- Denarii, building permits (Officium, Depot, Shrine) and garrison auxilia
+- Storage of each of your islands (Latium, Albion, Aegyptus)
+- Game settings incl. DLC options (e.g. volcanic activity), with the game's own texts and menu layout
+- German/English and light/dark mode
+
+Edits are always saved as a **new file**; the original stays untouched.
+
+### Getting started
+
+Download `Anno117-Savegame-Editor.exe` from [Releases](../../releases) and run it, no installation needed. Windows warns about an unknown program on first launch ("More info" → "Run anyway") because the file is not signed.
+
+On first launch the editor asks for your Anno 117 installation folder and your save game folder (usually `Documents\Anno 117 - Pax Romana`). It only reads names and texts from the game folder and never writes to it. Its settings and the names read from the game are stored in `%APPDATA%\Anno117 Savegame-Editor`.
+
+With Python 3 installed (standard library only) you can also double-click `savegame_editor.pyw`.
+
+### Build and test it yourself
+
+```
+pip install pyinstaller
+pyinstaller --onefile --windowed --name Anno117-Savegame-Editor savegame_editor.pyw
+```
+puts the .exe in `dist/`.
+
+```
+python savegame_editor.pyw --selftest "<save game>.a8s"
+```
+checks that a save game is written back byte-identical (the game folder must already be set).
+
+### File formats
+
+The file format (RDA container, FileDB, storage encoding, settings) is described in [STAND.md](STAND.md) (German). `tools/` holds the reader prototypes from the analysis.

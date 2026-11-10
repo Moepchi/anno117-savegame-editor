@@ -22,6 +22,9 @@ ALIAS = {'SetupTraderTraderPrices': 'TraderTradePrices',
 # pirate comboboxes -> field tag in the save (Dormancy left out on purpose: 2 = defeated has no menu entry)
 PIRATE = {'PirateRaidDifficulty': 'RaidDifficulty', 'PirateWarFleetDifficulty': 'WarFleetDifficulty',
           'PiratePatrolsDifficulty': 'PatrolDifficulty', 'PirateWarThreatsDifficulty': 'WarThreats'}
+# tab titles of the game's setup menu (SettingsMenu GUID -> LineId); assets.xml lists the menus but not their titles
+SECTIONS = {'150498': '-6914829576719174900', '50976': '-6913167428570173649', '51051': '-6909293900839592885',
+            '51052': '-6909425974996756542', '51053': '-6909049289369605519'}
 
 # English UI texts keyed by the German original; names of goods, islands and settings come from the game itself
 EN = {
@@ -39,10 +42,11 @@ EN = {
         'Double-click changes an amount. Select several rows with Ctrl/Shift and',
     'Auswahl setzen …': 'Set selection …',
     'Spieleinstellungen': 'Game settings',
-    'Doppelklick zum Ändern. Startoptionen (Startkapital, Inselgröße, Startschiffe …) wirken nach Spielbeginn nicht mehr. '
-    '„Rohwert“ = das Spiel hat dafür keinen Menütext.':
-        'Double-click to change. Start options (starting capital, island size, starting ships …) have no effect once '
-        'the game has started. "Raw value" = the game has no menu text for it.',
+    'Doppelklick zum Ändern. Gruppen und Reihenfolge wie im Spielmenü. Startoptionen (Startkapital, Inselgröße, '
+    'Startschiffe …) wirken nach Spielbeginn nicht mehr.':
+        'Double-click to change. Groups and order as in the game menu. Start options (starting capital, island size, '
+        'starting ships …) have no effect once the game has started.',
+    'Ohne Menütext im Spiel (Rohwerte)': 'Not in the game menu (raw values)',
     '{} markierte Waren': '{} selected goods',
     'Neue Menge für {}:': 'New amount for {}:',
     'Wert {} (unbekannt)': 'Value {} (unknown)',
@@ -340,7 +344,7 @@ def game_names(game, lang='de'):
     try:
         with open(cache_file, encoding='utf-8') as f:
             cache = json.load(f)
-        if cache['stamp'] == stamp and 'descs' in cache:
+        if cache['stamp'] == stamp and 'menu' in cache:
             return cache
     except (OSError, ValueError, KeyError):
         pass
@@ -366,7 +370,7 @@ def game_names(game, lang='de'):
             off = nxt
     clean = lambda t: re.sub(r'<[^>]*>', '', html.unescape(t)).strip()
     texts = {k: clean(v) for k, v in re.findall(r'<LineId>(-?\d+)</LineId>\s*<Text>(.*?)</Text>', raw['texts'], re.S)}
-    assets, descs = {}, {}
+    assets, descs, menus = {}, {}, {}
     for chunk in raw['assets'].split('<Asset>'):
         g, o = re.search(r'<GUID>(\d+)</GUID>', chunk), re.search(r'<OasisId>(-?\d+)</OasisId>', chunk)
         if g and o and o.group(1) in texts:
@@ -374,13 +378,29 @@ def game_names(game, lang='de'):
         d = '<Template>Product</Template>' in chunk and re.search(r'<InfoDescription>(-?\d+)<', chunk)
         if g and d and texts.get(d.group(1)):
             descs[g.group(1)] = texts[d.group(1)]  # tooltip text for goods
+        if g and '<Template>SettingsMenu</Template>' in chunk:
+            menus[g.group(1)] = chunk
+
+    def key_of(body):
+        m = re.search(r'Textsource>GameSetup\.RelevantGameSetup[.:](\w+)(?:\((?:datasets\.DifficultyCategory\.)?(\w+)\))?<', body)
+        fn, arg = m.groups() if m else (None, None)
+        return arg if fn == 'DifficultyCategoryValue' else f'Pirate:{arg}:{PIRATE[fn]}' if fn in PIRATE else None if arg else fn
+
+    # the setup menu as the game shows it: [tab, subheading, key], tabs in order, then one menu per DLC
+    order = re.findall(r'<Content>(\d+)</Content>', re.search(r'<GameSetupAdvancedDifficultiesScene>.*?</Categories>', raw['assets'], re.S).group(0))
+    dlcs = re.findall(r'<Dlc>(\d+)</Dlc>\s*<Settings>(\d+)</Settings>', re.search(r'<DlcDifficultyScene>.*?</DlcDifficultyScene>', raw['assets'], re.S).group(0))
+    menu = []
+    for g, title in [(g, texts.get(SECTIONS.get(g), '')) for g in order] + [(m, assets.get(d, '')) for d, m in dlcs]:
+        sub = ''
+        for el in re.findall(r'<Element>(.*?)</Element>', menus.get(g, ''), re.S):
+            if re.search(r'<Template>\w*Headline</Template>', el):
+                h = re.search(r'Headline>(-?\d+)<', el)
+                sub = texts.get(h.group(1), '') if h else ''
+            elif key_of(el):
+                menu.append([title, sub, key_of(el)])
     settings = {}
     for kind, body in re.findall(r'<(OptionCombobox|OptionToggle)>(.*?)</\1>', raw['assets'], re.S):
-        m = re.search(r'Textsource>GameSetup\.RelevantGameSetup[.:](\w+)(?:\((?:datasets\.DifficultyCategory\.)?(\w+)\))?<', body)
-        if not m:
-            continue
-        fn, arg = m.groups()
-        key = arg if fn == 'DifficultyCategoryValue' else f'Pirate:{arg}:{PIRATE[fn]}' if fn in PIRATE else None if arg else fn
+        key = key_of(body)
         head = re.search(r'Headline>(-?\d+)<', body)
         if kind == 'OptionToggle':
             options = [re.search(rf'<{t}>(-?\d+)<', body) for t in ('ActivatedText', 'DeactivatedText')]  # 0 = Activated (checked in-game)
@@ -389,16 +409,30 @@ def game_names(game, lang='de'):
             options = re.findall(r'<Text>(-?\d+)</Text>', body)
         if key and head and options:
             settings[key] = [texts.get(head.group(1), key), [texts.get(o, o) for o in options]]
-    cache = {'stamp': stamp, 'texts': texts, 'assets': assets, 'descs': descs, 'settings': settings}
+    cache = {'stamp': stamp, 'texts': texts, 'assets': assets, 'descs': descs, 'settings': settings, 'menu': menu}
     os.makedirs(DATA, exist_ok=True)
     with open(cache_file, 'w', encoding='utf-8') as f:
         json.dump(cache, f, ensure_ascii=False)
     return cache
 
 
+def menu_key(key):
+    """Save tag -> key used in assets.xml."""
+    return ALIAS.get(key, key.removeprefix('Setup'))
+
+
 def label(names, key):
     """[headline, options] for a setting key, or None if the game has no menu text for it."""
-    return names['settings'].get(ALIAS.get(key, key.removeprefix('Setup')))
+    return names['settings'].get(menu_key(key))
+
+
+def grouped(names, keys):
+    """[(tab, subheading, key)] in the game's menu order; keys the menu lacks go last, alphabetically."""
+    first = {}
+    for i, (tab, sub, k) in enumerate(names['menu']):
+        first.setdefault(k, (i, tab, sub))
+    rest = (len(names['menu']), t('Ohne Menütext im Spiel (Rohwerte)'), '')
+    return [(tab, sub, k) for (_, tab, sub), _, k in sorted((first.get(menu_key(k), rest), menu_key(k), k) for k in keys)]
 
 
 # ---------- window ----------
@@ -445,7 +479,7 @@ def windows_lang():
 def run_ui():
     global LANG
     import tkinter as tk
-    from tkinter import ttk, filedialog, messagebox, simpledialog
+    from tkinter import ttk, filedialog, messagebox, simpledialog, font as tkfont
 
     prefs = load_prefs()
     LANG = prefs['lang'] if prefs.get('lang') in LANGS else windows_lang()
@@ -494,9 +528,16 @@ def run_ui():
 
     tab2 = ttk.Frame(nb, padding=6)
     nb.add(tab2, text=t('Spieleinstellungen'))
-    tr(ttk.Label(tab2, wraplength=800), 'Doppelklick zum Ändern. Startoptionen (Startkapital, Inselgröße, Startschiffe …) '
-       'wirken nach Spielbeginn nicht mehr. „Rohwert“ = das Spiel hat dafür keinen Menütext.').pack(anchor='w')
-    sets = table(tab2, ('Einstellung', 'Wert'), (440, 320))
+    tr(ttk.Label(tab2, wraplength=800), 'Doppelklick zum Ändern. Gruppen und Reihenfolge wie im Spielmenü. Startoptionen '
+       '(Startkapital, Inselgröße, Startschiffe …) wirken nach Spielbeginn nicht mehr.').pack(anchor='w')
+    sets = table(tab2, ('Wert',), (320,))
+    sets.configure(show='tree headings')  # setting names in the tree column, grouped like the game menu
+    sets.heading('#0', text=t('Einstellung'))
+    sets.column('#0', width=440)
+    sets.column('Wert', anchor='e')
+    bold = tkfont.nametofont('TkDefaultFont').copy()
+    bold.configure(weight='bold')
+    sets.tag_configure('group', font=bold)
 
     def dirty():
         root.title(TITLE + ' *')
@@ -525,15 +566,24 @@ def run_ui():
         show_storage()
         goods.selection_set(rows)
 
+    def value_text(key):
+        v, lab = s['save'].setting(key), label(names, key)
+        if not lab:
+            return v
+        return lab[1][v] if v < len(lab[1]) else t('Wert {} (unbekannt)').format(v)
+
     def show_settings():
         sets.delete(*sets.get_children())
-        for key in sorted(s['save'].refs, key=lambda k: label(names, k) is None):  # menu settings first
-            v, lab = s['save'].setting(key), label(names, key)
-            if lab:
-                text = lab[1][v] if v < len(lab[1]) else t('Wert {} (unbekannt)').format(v)
-                sets.insert('', 'end', iid=key, values=(lab[0], text))
-            else:
-                sets.insert('', 'end', iid=key, values=(t('{} (Rohwert)').format(key), v))
+        for tab, sub, key in grouped(names, s['save'].refs):
+            parent = ''
+            for title in (tab, sub):  # group rows: '/tab' and '/tab/sub' (setting keys never start with '/')
+                if title:
+                    iid = f'{parent}/{title}'
+                    if not sets.exists(iid):
+                        sets.insert(parent, 'end', iid=iid, text=title, open=True, tags=('group',))
+                    parent = iid
+            lab = label(names, key)
+            sets.insert(parent, 'end', iid=key, text=lab[0] if lab else menu_key(key), values=(value_text(key),))
 
     def choose(title, options, current):
         win = tk.Toplevel(root)
@@ -566,7 +616,7 @@ def run_ui():
         if nv is not None and nv != v:
             s['save'].set_setting(key, nv)
             dirty()
-            show_settings()
+            sets.item(key, values=(value_text(key),))
 
     def open_save():
         saves = [p for p in glob.glob(os.path.join(glob.escape(prefs['saves']), '**', '*.a8s'), recursive=True)
@@ -628,7 +678,7 @@ def run_ui():
 
     goods.bind('<Motion>', hover)
     goods.bind('<Leave>', lambda e: tip.place_forget())
-    sets.bind('<Double-1>', lambda e: sets.identify_row(e.y) and edit_setting(sets.identify_row(e.y)))
+    sets.bind('<Double-1>', lambda e: (r := sets.identify_row(e.y)) and r in s['save'].refs and edit_setting(r))  # not on group rows
 
     dark = tk.BooleanVar(value=prefs.get('dark', windows_dark()))
 
@@ -679,6 +729,7 @@ def run_ui():
         for tv in (goods, sets):
             for c in tv['columns']:
                 tv.heading(c, text=t(c))
+        sets.heading('#0', text=t('Einstellung'))
         status.set(t('Lade Namen aus den Spieldateien …'))
         root.update()
         names = game_names(prefs['game'], LANG)
@@ -801,6 +852,9 @@ def selftest(path):
     assert t.storage(*t.storages(names)[0][1:]).get(1010017) == money
     os.remove(tmp)
     print(len(s.refs), 'Einstellungen,', sum(label(names, k) is not None for k in s.refs), 'mit Menütext')
+    groups = grouped(names, s.refs)
+    assert sorted(k for *_, k in groups) == sorted(s.refs), 'Gruppierung verliert Einstellungen'
+    print(len({g[:2] for g in groups}), 'Gruppen:', ', '.join(dict.fromkeys(g[0] for g in groups)))
     print('Selbsttest OK')
 
 
