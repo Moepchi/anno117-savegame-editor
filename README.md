@@ -19,7 +19,9 @@ Gespeichert wird immer als **neue Datei**, das Original bleibt unangetastet.
 
 Beim ersten Start fragt der Editor nach dem Installationsordner von Anno 117 und dem Ordner mit den Spielständen (meist `Dokumente\Anno 117 - Pax Romana`). Aus dem Spielordner liest er nur die Namen und Texte, er schreibt dort nichts hinein. Seine Einstellungen und die aus dem Spiel gelesenen Namen legt er in `%APPDATA%\Anno117 Savegame-Editor` ab.
 
-Mit installiertem Python 3 (nur Standardbibliothek) geht auch ein Doppelklick auf `savegame_editor.pyw`.
+Ab Version 1.2.0 sucht der Editor bei jedem Start auf GitHub nach einer neueren Version (er fragt nur `api.github.com` ab). Gibt es eine, fragt er nach. Mit „Ja“ lädt die exe das Update, prüft die Prüfsumme, ersetzt sich selbst und startet neu. Mit „Nein“ fragt er bei dieser Version nicht mehr nach. Ohne Internet startet er ohne Meldung. Von 1.0.0 oder 1.1.0 muss man 1.2.0 einmal von Hand herunterladen.
+
+Mit installiertem Python 3 (nur Standardbibliothek) geht auch ein Doppelklick auf `savegame_editor.pyw`. Die .pyw öffnet bei einem Update nur die Download-Seite.
 
 ### Selbst bauen und prüfen
 
@@ -33,6 +35,8 @@ legt die .exe in `dist/` ab.
 python savegame_editor.pyw --selftest "<Spielstand>.a8s"
 ```
 prüft, dass ein Spielstand byte-identisch neu geschrieben wird (der Spielordner muss schon gewählt sein).
+
+Für eine neue Version `VERSION` in `savegame_editor.pyw` hochsetzen und die exe bauen. Dann ein Release mit dem Tag `v<VERSION>` anlegen und die exe unter dem Namen `Anno117-Savegame-Editor.exe` anhängen. Nur dann findet die Update-Suche sie.
 
 ### Formate
 
@@ -55,7 +59,9 @@ Download `Anno117-Savegame-Editor.exe` from [Releases](../../releases) and run i
 
 On first launch the editor asks for your Anno 117 installation folder and your save game folder (usually `Documents\Anno 117 - Pax Romana`). It only reads names and texts from the game folder and never writes to it. Its settings and the names read from the game are stored in `%APPDATA%\Anno117 Savegame-Editor`.
 
-With Python 3 installed (standard library only) you can also double-click `savegame_editor.pyw`.
+From version 1.2.0 on, the editor checks GitHub for a newer version at every start (it only contacts `api.github.com`). If one exists, it asks first. Click "Yes" and the exe downloads the update, verifies its checksum, replaces itself and restarts. Click "No" and it won't ask again about that version. Without internet it starts without a message. Users of 1.0.0 or 1.1.0 need to download 1.2.0 once by hand.
+
+With Python 3 installed (standard library only) you can also double-click `savegame_editor.pyw`. For an update, the .pyw only opens the download page.
 
 ### Build and test it yourself
 
@@ -69,6 +75,8 @@ puts the .exe in `dist/`.
 python savegame_editor.pyw --selftest "<save game>.a8s"
 ```
 checks that a save game is written back byte-identical (the game folder must already be set).
+
+To ship a new version, raise `VERSION` in `savegame_editor.pyw` and build the exe. Then create a release tagged `v<VERSION>` and attach the exe as `Anno117-Savegame-Editor.exe`. Only then will the update check find it.
 
 ### File formats
 

@@ -5,14 +5,17 @@ Speichert immer als neue Datei, das Original bleibt unangetastet. Formatnotizen:
   savegame_editor.pyw                       Fenster (Doppelklick)
   python savegame_editor.pyw --selftest X   prueft, dass Spielstand X unveraendert identisch neu geschrieben wird
 """
-import glob, html, json, os, re, struct, sys, tempfile, time, zlib
+import glob, hashlib, html, json, os, re, struct, subprocess, sys, tempfile, threading, time, urllib.request, webbrowser, zlib
 
 DATA = os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~'), 'Anno117 Savegame-Editor')
 CACHE = os.path.join(DATA, 'namen_{}.json')  # game names per language
 PREFS = os.path.join(DATA, 'einstellungen.json')  # game folder, save folder, dark mode, language
 LANGS = {'de': ('Deutsch', 'german'), 'en': ('English', 'english')}  # code: (menu name, texts_<x>.xml)
 LANG = 'de'  # set by the window
-TITLE = 'Anno 117 Savegame-Editor'
+VERSION = '1.2.0'  # the GitHub release tag is 'v' + VERSION
+TITLE = f'Anno 117 Savegame-Editor {VERSION}'
+UPDATE_API = 'https://api.github.com/repos/Moepchi/anno117-savegame-editor/releases/latest'
+EXE = 'Anno117-Savegame-Editor.exe'  # release asset name
 PLAYER = 41  # OwnerProfile / ParticipantGUID of the human player
 MAGIC = b'\x08\x00\x00\x00\xfd\xff\xff\xff'
 # setup tags whose UI category is spelled differently in assets.xml
@@ -52,6 +55,13 @@ EN = {
     'Wert {} (unbekannt)': 'Value {} (unknown)',
     '{} (Rohwert)': '{} (raw value)',
     'Übernehmen': 'Apply',
+    'Version {} ist verfügbar (du hast {}).': 'Version {} is available (you have {}).',
+    'Jetzt herunterladen und neu starten?': 'Download it and restart now?',
+    'Download-Seite öffnen?': 'Open the download page?',
+    'Ungespeicherte Änderungen gehen dabei verloren.': 'Unsaved changes will be lost.',
+    'Lade Update …': 'Downloading update …',
+    'Update fehlgeschlagen: {}': 'Update failed: {}',
+    'Prüfsumme des Downloads stimmt nicht.': "The download's checksum does not match.",
     'Spielstand öffnen': 'Open save game',
     'Anno 117 Spielstand': 'Anno 117 save game',
     'Lade Spielstand …': 'Loading save game …',
@@ -435,6 +445,42 @@ def grouped(names, keys):
     return [(tab, sub, k) for (_, tab, sub), _, k in sorted((first.get(menu_key(k), rest), menu_key(k), k) for k in keys)]
 
 
+# ---------- updates from the GitHub releases ----------
+
+def fetch(url):
+    req = urllib.request.Request(url, headers={'User-Agent': 'Anno117-Savegame-Editor'})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return r.read()
+
+
+def version(tag):
+    return tuple(int(n) for n in re.findall(r'\d+', tag))
+
+
+def newer_release():
+    """The latest release on GitHub if it is newer than this program, else None."""
+    rel = json.loads(fetch(UPDATE_API))
+    return rel if version(rel['tag_name']) > version(VERSION) else None
+
+
+def install_update(asset, exe):
+    """Download the new exe, check its SHA-256 and swap it in (a running exe can be renamed, not overwritten)."""
+    data = fetch(asset['browser_download_url'])
+    if asset.get('digest') != 'sha256:' + hashlib.sha256(data).hexdigest():
+        raise ValueError(t('Prüfsumme des Downloads stimmt nicht.'))
+    new, old = exe + '.new', exe + '.old'
+    with open(new, 'wb') as f:
+        f.write(data)
+    if os.path.exists(old):
+        os.remove(old)
+    os.replace(exe, old)
+    try:
+        os.replace(new, exe)
+    except OSError:
+        os.replace(old, exe)  # keep the running version in place
+        raise
+
+
 # ---------- window ----------
 
 def load_prefs():
@@ -805,12 +851,65 @@ def run_ui():
     tr(ttk.Checkbutton(bar, variable=dark, command=toggle_theme), 'Dunkler Modus').pack(side='right')
     apply_theme()
 
+    def background(work, done):
+        """work() in a thread (network), then done(result, error) back in the Tk thread."""
+        res = []
+
+        def run():
+            try:
+                res.append((work(), None))
+            except Exception as e:  # offline, GitHub down, …
+                res.append((None, e))
+
+        def poll():
+            if res:
+                done(*res[0])
+            else:
+                root.after(300, poll)
+
+        threading.Thread(target=run, daemon=True).start()
+        poll()
+
+    def offer_update(rel, err):
+        if err or not rel or rel['tag_name'] == prefs.get('skip'):
+            return  # offline, nothing new or declined before: stay quiet
+        asset = next((a for a in rel['assets'] if a['name'] == EXE), None)
+        frozen = getattr(sys, 'frozen', False) and asset  # the .exe can replace itself; the .pyw only points to the page
+        msg = t('Version {} ist verfügbar (du hast {}).').format(rel['tag_name'].lstrip('v'), VERSION) + '\n\n'
+        msg += t('Jetzt herunterladen und neu starten?') if frozen else t('Download-Seite öffnen?')
+        if frozen and root.title().endswith('*'):
+            msg += '\n' + t('Ungespeicherte Änderungen gehen dabei verloren.')
+        if not messagebox.askyesno(TITLE, msg, parent=root):
+            prefs['skip'] = rel['tag_name']  # don't ask again for this version
+            save_prefs()
+        elif not frozen:
+            webbrowser.open(rel['html_url'])
+        else:
+            before = status.get()
+            status.set(t('Lade Update …'))
+            background(lambda: install_update(asset, sys.executable), lambda _, e: restart(e, before))
+
+    def restart(err, before):
+        if err:
+            status.set(before)
+            messagebox.showerror(TITLE, t('Update fehlgeschlagen: {}').format(err), parent=root)
+            return
+        # PYINSTALLER_RESET_ENVIRONMENT: start the new exe as its own program, not as a child of this one
+        subprocess.Popen([sys.executable], env=dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT='1'))
+        root.destroy()
+
+    if getattr(sys, 'frozen', False):
+        try:
+            os.remove(sys.executable + '.old')  # left over from the last update
+        except OSError:
+            pass
     root.update()
     if not ask_folders():
         root.destroy()
         return
     names = game_names(prefs['game'], LANG)
     status.set(t('Spielstand öffnen, um zu beginnen.'))
+    background(newer_release, offer_update)
     root.mainloop()
 
 
@@ -852,6 +951,7 @@ def selftest(path):
     assert t.storage(*t.storages(names)[0][1:]).get(1010017) == money
     os.remove(tmp)
     print(len(s.refs), 'Einstellungen,', sum(label(names, k) is not None for k in s.refs), 'mit Menütext')
+    assert version('v1.10.0') > version('1.9.2') > version('v1.9'), 'Versionsvergleich'
     groups = grouped(names, s.refs)
     assert sorted(k for *_, k in groups) == sorted(s.refs), 'Gruppierung verliert Einstellungen'
     print(len({g[:2] for g in groups}), 'Gruppen:', ', '.join(dict.fromkeys(g[0] for g in groups)))
