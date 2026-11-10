@@ -7,11 +7,11 @@ Speichert immer als neue Datei, das Original bleibt unangetastet. Formatnotizen:
 """
 import glob, html, json, os, re, struct, sys, tempfile, time, zlib
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-GAME = r'F:\Launcher\Steam\steamapps\common\Anno 117 - Pax Romana'
-SAVES = os.path.join(os.environ['USERPROFILE'], 'OneDrive', 'Dokumente', 'Anno 117 - Pax Romana', 'accounts')
-CACHE = os.path.join(HERE, 'namen_de.json')
-PREFS = os.path.join(HERE, 'einstellungen.json')  # remembers the dark-mode choice
+DATA = os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~'), 'Anno117 Savegame-Editor')
+CACHE = os.path.join(DATA, 'namen_{}.json')  # game names per language
+PREFS = os.path.join(DATA, 'einstellungen.json')  # game folder, save folder, dark mode, language
+LANGS = {'de': ('Deutsch', 'german'), 'en': ('English', 'english')}  # code: (menu name, texts_<x>.xml)
+LANG = 'de'  # set by the window
 TITLE = 'Anno 117 Savegame-Editor'
 PLAYER = 41  # OwnerProfile / ParticipantGUID of the human player
 MAGIC = b'\x08\x00\x00\x00\xfd\xff\xff\xff'
@@ -23,18 +23,73 @@ ALIAS = {'SetupTraderTraderPrices': 'TraderTradePrices',
 PIRATE = {'PirateRaidDifficulty': 'RaidDifficulty', 'PirateWarFleetDifficulty': 'WarFleetDifficulty',
           'PiratePatrolsDifficulty': 'PatrolDifficulty', 'PirateWarThreatsDifficulty': 'WarThreats'}
 
+# English UI texts keyed by the German original; names of goods, islands and settings come from the game itself
+EN = {
+    'Kein Anno-Spielstand': 'Not an Anno save game',
+    'Unerwartetes Spielstandformat (Block-Flags {})': 'Unexpected save game format (block flags {})',
+    'Unbekanntes FileDB-Format': 'Unknown FileDB format',
+    'Mengen über 255 sind in diesem Lager nicht möglich (Spielstand kennt kein StrgLrg).':
+        'Amounts above 255 are not possible in this storage (the save has no StrgLrg).',
+    'Reich: Denare, Baurechte, Reserven': 'Empire: Denarii, permits, auxilia',
+    'Insel': 'Island',
+    'Lade Namen aus den Spieldateien …': 'Loading names from the game files …',
+    'Denare & Lager': 'Denarii & storage',
+    'Ware': 'Good', 'Menge': 'Amount', 'Einstellung': 'Setting', 'Wert': 'Value',
+    'Doppelklick ändert eine Menge. Mehrere Zeilen mit Strg/Umschalt markieren und':
+        'Double-click changes an amount. Select several rows with Ctrl/Shift and',
+    'Auswahl setzen …': 'Set selection …',
+    'Spieleinstellungen': 'Game settings',
+    'Doppelklick zum Ändern. Startoptionen (Startkapital, Inselgröße, Startschiffe …) wirken nach Spielbeginn nicht mehr. '
+    '„Rohwert“ = das Spiel hat dafür keinen Menütext.':
+        'Double-click to change. Start options (starting capital, island size, starting ships …) have no effect once '
+        'the game has started. "Raw value" = the game has no menu text for it.',
+    '{} markierte Waren': '{} selected goods',
+    'Neue Menge für {}:': 'New amount for {}:',
+    'Wert {} (unbekannt)': 'Value {} (unknown)',
+    '{} (Rohwert)': '{} (raw value)',
+    'Übernehmen': 'Apply',
+    'Spielstand öffnen': 'Open save game',
+    'Anno 117 Spielstand': 'Anno 117 save game',
+    'Lade Spielstand …': 'Loading save game …',
+    'Geladen: {}': 'Loaded: {}',
+    'Speichern unter': 'Save as',
+    ' bearbeitet': ' edited',
+    'Bitte unter neuem Namen speichern, das Original bleibt unangetastet.':
+        'Please save under a new name; the original stays untouched.',
+    'Speichere …': 'Saving …',
+    'Gespeichert: {}': 'Saved: {}',
+    'Spielstand öffnen …': 'Open save game …',
+    'Speichern unter …': 'Save as …',
+    'Dunkler Modus': 'Dark mode',
+    'Bitte wähle den Installationsordner von Anno 117 (der Ordner mit „maindata“), '
+    'z. B. …\\steamapps\\common\\Anno 117 - Pax Romana.':
+        'Please choose the Anno 117 installation folder (the one containing "maindata"), '
+        'e.g. …\\steamapps\\common\\Anno 117 - Pax Romana.',
+    'In diesem Ordner fehlt „maindata\\config.rda“. Bitte den Installationsordner von Anno 117 wählen.':
+        'This folder has no "maindata\\config.rda". Please choose the Anno 117 installation folder.',
+    'Anno 117 Installationsordner': 'Anno 117 installation folder',
+    'Bitte wähle den Ordner mit deinen Spielständen, meist Dokumente\\Anno 117 - Pax Romana.':
+        'Please choose the folder with your save games, usually Documents\\Anno 117 - Pax Romana.',
+    'Ordner mit den Spielständen': 'Save game folder',
+    'Spielstand öffnen, um zu beginnen.': 'Open a save game to begin.',
+}
+
+
+def t(text):
+    return EN.get(text, text) if LANG == 'en' else text
+
 
 # ---------- RDA container (.a8s): per inner file [data][560 B directory entry][32 B block header] ----------
 
 def read_rda(path):
     data = open(path, 'rb').read()
     if data[:18] != b'Resource File V2.2':
-        raise ValueError('Kein Anno-Spielstand')
+        raise ValueError(t('Kein Anno-Spielstand'))
     off, files = struct.unpack_from('<Q', data, 784)[0], []
     while off < len(data):
         flags, n, dsize, _, nxt = struct.unpack_from('<IIQQQ', data, off)
         if flags:
-            raise ValueError(f'Unerwartetes Spielstandformat (Block-Flags {flags})')
+            raise ValueError(t('Unerwartetes Spielstandformat (Block-Flags {})').format(flags))
         for i in range(n):
             e = data[off - dsize + i * 560:off - dsize + (i + 1) * 560]
             foff, size = struct.unpack_from('<QQ', e, 520)
@@ -73,7 +128,7 @@ class FileDB:
         self.packed = data[:2] == b'\x78\xda'
         d = zlib.decompress(data) if self.packed else data
         if d[-8:] != MAGIC:
-            raise ValueError('Unbekanntes FileDB-Format')
+            raise ValueError(t('Unbekanntes FileDB-Format'))
         self.count, toff, aoff = struct.unpack_from('<III', d, len(d) - 20)
         self.dicts, self.aoff = d[toff:len(d) - 20], aoff - toff
         self.names, self.ids = {1: 'None', 0x8000: 'None'}, {}
@@ -216,13 +271,13 @@ class Save:
 
     def storages(self, names):
         """[(label, db, tag holding the storage)]: the empire storage (Denare) and every player island's warehouse."""
-        out = [('Reich: Denare, Baurechte, Reserven', self.data, t) for t in self.empire()]
+        out = [(t('Reich: Denare, Baurechte, Reserven'), self.data, e) for e in self.empire()]
         for guid, _, db in self.sessions:
             for area in db.path('GameSessionManager', 'AreaInfo', 'None'):
                 owner, city, econ = db.attr(area, 'OwnerProfile'), db.attr(area, 'CityNameGuid'), db.tags(area, 'AreaEconomy')
                 if owner and econ and struct.unpack('<i', owner[1][:4])[0] == PLAYER and self.storage_attr(db, econ[0]):
                     name = city and names['texts'].get(str(struct.unpack('<q', city[1][:8])[0]))
-                    out.append((f'{name or "Insel"} ({names["assets"].get(str(guid), guid)})', db, econ[0]))
+                    out.append((f'{name or t("Insel")} ({names["assets"].get(str(guid), guid)})', db, econ[0]))
         return out
 
     def empire(self):
@@ -245,7 +300,7 @@ class Save:
         a = self.storage_attr(db, tag)
         kind, value = encode_storage(items, db.name(a) == 'StrgSmll')
         if (kind, True) not in db.ids:
-            raise ValueError('Mengen über 255 sind in diesem Lager nicht möglich (Spielstand kennt kein StrgLrg).')
+            raise ValueError(t('Mengen über 255 sind in diesem Lager nicht möglich (Spielstand kennt kein StrgLrg).'))
         a[0], a[1] = db.ids[kind, True], value
         self.changed.add(db)
 
@@ -273,19 +328,23 @@ class Save:
         write_rda(path, self.head, files)
 
 
-# ---------- German names and setting labels from the game files (cached next to this script) ----------
+# ---------- names and setting labels from the game files, per language (cached next to this script) ----------
 
-def game_names():
-    src = os.path.join(GAME, 'maindata', 'config.rda')
-    stamp = os.path.getmtime(src)
+def is_game_dir(path):
+    return os.path.isfile(os.path.join(path, 'maindata', 'config.rda'))
+
+
+def game_names(game, lang='de'):
+    src = os.path.join(game, 'maindata', 'config.rda')
+    stamp, cache_file = os.path.getmtime(src), CACHE.format(lang)
     try:
-        with open(CACHE, encoding='utf-8') as f:
+        with open(cache_file, encoding='utf-8') as f:
             cache = json.load(f)
         if cache['stamp'] == stamp and 'descs' in cache:
             return cache
     except (OSError, ValueError, KeyError):
         pass
-    wanted = {'data/base/config/export/assets.xml': 'assets', 'data/base/config/gui/texts_german.xml': 'texts'}
+    wanted = {'data/base/config/export/assets.xml': 'assets', f'data/base/config/gui/texts_{LANGS[lang][1]}.xml': 'texts'}
     raw = {}
     with open(src, 'rb') as f:
         off, size = struct.unpack_from('<Q', f.read(792), 784)[0], f.seek(0, 2)
@@ -331,7 +390,8 @@ def game_names():
         if key and head and options:
             settings[key] = [texts.get(head.group(1), key), [texts.get(o, o) for o in options]]
     cache = {'stamp': stamp, 'texts': texts, 'assets': assets, 'descs': descs, 'settings': settings}
-    with open(CACHE, 'w', encoding='utf-8') as f:
+    os.makedirs(DATA, exist_ok=True)
+    with open(cache_file, 'w', encoding='utf-8') as f:
         json.dump(cache, f, ensure_ascii=False)
     return cache
 
@@ -343,6 +403,26 @@ def label(names, key):
 
 # ---------- window ----------
 
+def load_prefs():
+    try:
+        with open(PREFS, encoding='utf-8') as f:
+            prefs = json.load(f)
+        return prefs if isinstance(prefs, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def documents():
+    """The real Documents folder (follows a OneDrive redirect)."""
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(260)
+        ctypes.windll.shell32.SHGetFolderPathW(None, 5, None, 0, buf)  # CSIDL_PERSONAL
+        return buf.value or os.path.expanduser('~')
+    except (AttributeError, OSError):
+        return os.path.expanduser('~')
+
+
 def windows_dark():
     """True if Windows apps are set to dark mode (default before the user picks one)."""
     try:
@@ -353,29 +433,48 @@ def windows_dark():
         return False
 
 
+def windows_lang():
+    """'de' if Windows runs in German, else 'en' (default before the user picks one)."""
+    try:
+        import ctypes
+        return 'de' if ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3ff == 0x07 else 'en'
+    except (AttributeError, OSError):
+        return 'de'
+
+
 def run_ui():
+    global LANG
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox, simpledialog
 
+    prefs = load_prefs()
+    LANG = prefs['lang'] if prefs.get('lang') in LANGS else windows_lang()
     root = tk.Tk()
     root.title(TITLE)
     root.geometry('860x660')
     root.report_callback_exception = lambda typ, err, tb: messagebox.showerror(TITLE, f'{typ.__name__}: {err}')
-    status = tk.StringVar(value='Lade Namen aus den Spieldateien …')
+    status = tk.StringVar(value=t('Lade Namen aus den Spieldateien …'))
     s = {'save': None, 'storages': []}
+    names = {'descs': {}}  # game names; loaded once the game folder is known (the tooltip may fire before)
+    texts = []  # (widget, German text), re-translated when the language changes
+
+    def tr(widget, text):
+        texts.append((widget, text))
+        widget.configure(text=t(text))
+        return widget
 
     def table(parent, cols, widths):
         frame = ttk.Frame(parent)
         frame.pack(fill='both', expand=True, pady=6)
-        t = ttk.Treeview(frame, columns=cols, show='headings')
+        tv = ttk.Treeview(frame, columns=cols, show='headings')
         for c, w in zip(cols, widths):
-            t.heading(c, text=c)
-            t.column(c, width=w, anchor='w' if c == cols[0] else 'e')
-        sb = ttk.Scrollbar(frame, command=t.yview)
-        t.configure(yscrollcommand=sb.set)
-        t.pack(side='left', fill='both', expand=True)
+            tv.heading(c, text=t(c))
+            tv.column(c, width=w, anchor='w' if c == cols[0] else 'e')
+        sb = ttk.Scrollbar(frame, command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        tv.pack(side='left', fill='both', expand=True)
         sb.pack(side='right', fill='y')
-        return t
+        return tv
 
     bar = ttk.Frame(root, padding=6)
     bar.pack(fill='x')
@@ -384,20 +483,19 @@ def run_ui():
     ttk.Label(root, textvariable=status, padding=6).pack(fill='x')
 
     tab1 = ttk.Frame(nb, padding=6)
-    nb.add(tab1, text='Denare & Lager')
+    nb.add(tab1, text=t('Denare & Lager'))
     pick = ttk.Combobox(tab1, state='readonly', width=60)
     pick.pack(anchor='w')
     goods = table(tab1, ('Ware', 'Menge', 'GUID'), (440, 160, 100))
     row = ttk.Frame(tab1)
     row.pack(fill='x')
-    ttk.Label(row, text='Doppelklick ändert eine Menge. Mehrere Zeilen mit Strg/Umschalt markieren und').pack(side='left')
-    ttk.Button(row, text='Auswahl setzen …', command=lambda: edit_goods(goods.selection())).pack(side='left', padx=6)
+    tr(ttk.Label(row), 'Doppelklick ändert eine Menge. Mehrere Zeilen mit Strg/Umschalt markieren und').pack(side='left')
+    tr(ttk.Button(row, command=lambda: edit_goods(goods.selection())), 'Auswahl setzen …').pack(side='left', padx=6)
 
     tab2 = ttk.Frame(nb, padding=6)
-    nb.add(tab2, text='Spieleinstellungen')
-    ttk.Label(tab2, wraplength=800, text='Doppelklick zum Ändern. Startoptionen (Startkapital, Inselgröße, Startschiffe …) '
-              'wirken nach Spielbeginn nicht mehr. „Rohwert“ = das Spiel hat dafür keinen Menütext.'
-              ).pack(anchor='w')
+    nb.add(tab2, text=t('Spieleinstellungen'))
+    tr(ttk.Label(tab2, wraplength=800), 'Doppelklick zum Ändern. Startoptionen (Startkapital, Inselgröße, Startschiffe …) '
+       'wirken nach Spielbeginn nicht mehr. „Rohwert“ = das Spiel hat dafür keinen Menütext.').pack(anchor='w')
     sets = table(tab2, ('Einstellung', 'Wert'), (440, 320))
 
     def dirty():
@@ -408,15 +506,15 @@ def run_ui():
         goods.delete(*goods.get_children())
         for guid, amount in s['save'].storage(db, tag).items():
             goods.insert('', 'end', iid=str(guid), values=(
-                names['assets'].get(str(guid), f'GUID {guid}'), f'{amount:,}'.replace(',', '.'), guid))
+                names['assets'].get(str(guid), f'GUID {guid}'), f'{amount:,}'.replace(',', '.' if LANG == 'de' else ','), guid))
 
     def edit_goods(rows):
         if not rows:
             return
         _, db, tag = s['storages'][pick.current()]
         items = s['save'].storage(db, tag)
-        what = goods.set(rows[0], 'Ware') if len(rows) == 1 else f'{len(rows)} markierte Waren'
-        v = simpledialog.askinteger(TITLE, f'Neue Menge für {what}:', initialvalue=items[int(rows[0])],
+        what = goods.set(rows[0], 'Ware') if len(rows) == 1 else t('{} markierte Waren').format(len(rows))
+        v = simpledialog.askinteger(TITLE, t('Neue Menge für {}:').format(what), initialvalue=items[int(rows[0])],
                                     minvalue=0, maxvalue=2 ** 31 - 1, parent=root)
         if v is None:
             return
@@ -432,10 +530,10 @@ def run_ui():
         for key in sorted(s['save'].refs, key=lambda k: label(names, k) is None):  # menu settings first
             v, lab = s['save'].setting(key), label(names, key)
             if lab:
-                text = lab[1][v] if v < len(lab[1]) else f'Wert {v} (unbekannt)'
+                text = lab[1][v] if v < len(lab[1]) else t('Wert {} (unbekannt)').format(v)
                 sets.insert('', 'end', iid=key, values=(lab[0], text))
             else:
-                sets.insert('', 'end', iid=key, values=(f'{key} (Rohwert)', v))
+                sets.insert('', 'end', iid=key, values=(t('{} (Rohwert)').format(key), v))
 
     def choose(title, options, current):
         win = tk.Toplevel(root)
@@ -455,7 +553,7 @@ def run_ui():
             win.destroy()
 
         lb.bind('<Double-1>', ok)
-        ttk.Button(win, text='Übernehmen', command=ok).pack(pady=(0, 10))
+        ttk.Button(win, text=t('Übernehmen'), command=ok).pack(pady=(0, 10))
         win.wait_window()
         return res[0] if res else None
 
@@ -464,20 +562,22 @@ def run_ui():
         if lab:
             nv = choose(lab[0], lab[1], v)
         else:
-            nv = simpledialog.askinteger(TITLE, f'{key} (Rohwert):', initialvalue=v, minvalue=0, maxvalue=65535, parent=root)
+            nv = simpledialog.askinteger(TITLE, t('{} (Rohwert)').format(key) + ':', initialvalue=v, minvalue=0, maxvalue=65535, parent=root)
         if nv is not None and nv != v:
             s['save'].set_setting(key, nv)
             dirty()
             show_settings()
 
     def open_save():
-        newest = max(glob.glob(os.path.join(SAVES, '*', '*', '*.a8s')), key=os.path.getmtime, default=None)
-        path = filedialog.askopenfilename(title='Spielstand öffnen', filetypes=[('Anno 117 Spielstand', '*.a8s')],
-                                          initialdir=newest and os.path.dirname(newest),
+        saves = [p for p in glob.glob(os.path.join(glob.escape(prefs['saves']), '**', '*.a8s'), recursive=True)
+                 if os.path.basename(p).lower() != 'accountdata.a8s']  # account file, not a save
+        newest = max(saves, key=os.path.getmtime, default=None)
+        path = filedialog.askopenfilename(title=t('Spielstand öffnen'), filetypes=[(t('Anno 117 Spielstand'), '*.a8s')],
+                                          initialdir=os.path.dirname(newest) if newest else prefs['saves'],
                                           initialfile=newest and os.path.basename(newest))
         if not path:
             return
-        status.set('Lade Spielstand …')
+        status.set(t('Lade Spielstand …'))
         root.update()
         save = Save(path)
         s.update(save=save, storages=save.storages(names))
@@ -487,27 +587,27 @@ def run_ui():
         show_settings()
         save_btn['state'] = 'normal'
         root.title(TITLE)
-        status.set(f'Geladen: {path}')
+        status.set(t('Geladen: {}').format(path))
 
     def save_as():
         src = s['save'].path
         path = filedialog.asksaveasfilename(
-            title='Speichern unter', initialdir=os.path.dirname(src), defaultextension='.a8s',
-            initialfile=os.path.splitext(os.path.basename(src))[0] + ' bearbeitet.a8s',
-            filetypes=[('Anno 117 Spielstand', '*.a8s')])
+            title=t('Speichern unter'), initialdir=os.path.dirname(src), defaultextension='.a8s',
+            initialfile=os.path.splitext(os.path.basename(src))[0] + t(' bearbeitet') + '.a8s',
+            filetypes=[(t('Anno 117 Spielstand'), '*.a8s')])
         if not path:
             return
         if os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(src)):
-            messagebox.showerror(TITLE, 'Bitte unter neuem Namen speichern, das Original bleibt unangetastet.')
+            messagebox.showerror(TITLE, t('Bitte unter neuem Namen speichern, das Original bleibt unangetastet.'))
             return
-        status.set('Speichere …')
+        status.set(t('Speichere …'))
         root.update()
         s['save'].write(path)
         root.title(TITLE)
-        status.set(f'Gespeichert: {path}')
+        status.set(t('Gespeichert: {}').format(path))
 
-    ttk.Button(bar, text='Spielstand öffnen …', command=open_save).pack(side='left')
-    save_btn = ttk.Button(bar, text='Speichern unter …', command=save_as, state='disabled')
+    tr(ttk.Button(bar, command=open_save), 'Spielstand öffnen …').pack(side='left')
+    save_btn = tr(ttk.Button(bar, command=save_as, state='disabled'), 'Speichern unter …')
     save_btn.pack(side='left', padx=6)
     pick.bind('<<ComboboxSelected>>', show_storage)
     goods.bind('<Double-1>', lambda e: goods.identify_row(e.y) and edit_goods((goods.identify_row(e.y),)))
@@ -530,14 +630,74 @@ def run_ui():
     goods.bind('<Leave>', lambda e: tip.place_forget())
     sets.bind('<Double-1>', lambda e: sets.identify_row(e.y) and edit_setting(sets.identify_row(e.y)))
 
+    dark = tk.BooleanVar(value=prefs.get('dark', windows_dark()))
+
+    def save_prefs():
+        prefs.update(dark=dark.get(), lang=LANG)
+        try:
+            os.makedirs(DATA, exist_ok=True)
+            with open(PREFS, 'w', encoding='utf-8') as f:
+                json.dump(prefs, f, ensure_ascii=False, indent=1)
+        except OSError:
+            pass
+
+    def ask_folders():
+        """First start (or the game moved): ask for the game folder and the save folder. False = cancelled."""
+        msg = ('Bitte wähle den Installationsordner von Anno 117 (der Ordner mit „maindata“), '
+               'z. B. …\\steamapps\\common\\Anno 117 - Pax Romana.')
+        while not is_game_dir(prefs.get('game', '')):
+            messagebox.showinfo(TITLE, t(msg), parent=root)
+            path = filedialog.askdirectory(title=t('Anno 117 Installationsordner'), mustexist=True, parent=root)
+            if not path:
+                return False
+            prefs['game'] = os.path.normpath(path)
+            msg = 'In diesem Ordner fehlt „maindata\\config.rda“. Bitte den Installationsordner von Anno 117 wählen.'
+        if not os.path.isdir(prefs.get('saves', '')):
+            guess = os.path.join(documents(), 'Anno 117 - Pax Romana')
+            messagebox.showinfo(TITLE, t('Bitte wähle den Ordner mit deinen Spielständen, meist Dokumente\\Anno 117 - Pax Romana.'),
+                                parent=root)
+            path = filedialog.askdirectory(title=t('Ordner mit den Spielständen'), mustexist=True, parent=root,
+                                           initialdir=guess if os.path.isdir(guess) else documents())
+            prefs['saves'] = os.path.normpath(path or guess)
+        save_prefs()
+        return True
+
+    # language: UI texts from EN, names of goods/islands/settings from the game's texts_<language>.xml
+    lang_box = ttk.Combobox(bar, state='readonly', width=9, values=[v[0] for v in LANGS.values()])
+    lang_box.current(list(LANGS).index(LANG))
+    lang_box.pack(side='right', padx=(10, 0))
+
+    def set_lang(*_):
+        global LANG
+        nonlocal names
+        LANG = list(LANGS)[lang_box.current()]
+        save_prefs()
+        for w, text in texts:
+            w.configure(text=t(text))
+        nb.tab(tab1, text=t('Denare & Lager'))
+        nb.tab(tab2, text=t('Spieleinstellungen'))
+        for tv in (goods, sets):
+            for c in tv['columns']:
+                tv.heading(c, text=t(c))
+        status.set(t('Lade Namen aus den Spieldateien …'))
+        root.update()
+        names = game_names(prefs['game'], LANG)
+        if not s['save']:
+            status.set(t('Spielstand öffnen, um zu beginnen.'))
+            return
+        i = pick.current()
+        s['storages'] = s['save'].storages(names)
+        pick['values'] = [x[0] for x in s['storages']]
+        pick.current(i)
+        show_storage()
+        show_settings()
+        status.set(t('Geladen: {}').format(s['save'].path))
+
+    lang_box.bind('<<ComboboxSelected>>', set_lang)
+
     # dark mode: ttk 'clam' recoloured; plain tk widgets (dialogs, lists) via the option database
     style = ttk.Style()
     light_theme = style.theme_use()
-    try:
-        with open(PREFS, encoding='utf-8') as f:
-            dark = tk.BooleanVar(value=json.load(f)['dark'])
-    except (OSError, ValueError, KeyError):
-        dark = tk.BooleanVar(value=windows_dark())
 
     def apply_theme():
         d = dark.get()
@@ -571,12 +731,13 @@ def run_ui():
             style.theme_use(light_theme)
         root.configure(bg=bg if d else 'SystemButtonFace')
         tip.configure(bg='#3a3a3a' if d else '#ffffe1', fg=fg if d else 'black')
-        try:  # the combobox drop-down list is a plain tk listbox
-            pop = root.tk.eval(f'ttk::combobox::PopdownWindow {pick}')
-            root.tk.call(f'{pop}.f.l', 'configure', '-background', field if d else 'SystemWindow',
-                         '-foreground', fg if d else 'SystemWindowText', '-selectbackground', sel if d else 'SystemHighlight')
-        except tk.TclError:
-            pass
+        for box in (pick, lang_box):  # combobox drop-down lists are plain tk listboxes
+            try:
+                pop = root.tk.eval(f'ttk::combobox::PopdownWindow {box}')
+                root.tk.call(f'{pop}.f.l', 'configure', '-background', field if d else 'SystemWindow',
+                             '-foreground', fg if d else 'SystemWindowText', '-selectbackground', sel if d else 'SystemHighlight')
+            except tk.TclError:
+                pass
         try:  # dark Windows title bar (DWMWA_USE_IMMERSIVE_DARK_MODE), then force a frame redraw
             import ctypes
             root.update_idletasks()
@@ -588,24 +749,25 @@ def run_ui():
 
     def toggle_theme():
         apply_theme()
-        try:
-            with open(PREFS, 'w', encoding='utf-8') as f:
-                json.dump({'dark': dark.get()}, f)
-        except OSError:
-            pass
+        save_prefs()
 
-    ttk.Checkbutton(bar, text='Dunkler Modus', variable=dark, command=toggle_theme).pack(side='right')
+    tr(ttk.Checkbutton(bar, variable=dark, command=toggle_theme), 'Dunkler Modus').pack(side='right')
     apply_theme()
 
     root.update()
-    names = game_names()
-    status.set('Spielstand öffnen, um zu beginnen.')
+    if not ask_folders():
+        root.destroy()
+        return
+    names = game_names(prefs['game'], LANG)
+    status.set(t('Spielstand öffnen, um zu beginnen.'))
     root.mainloop()
 
 
 # ---------- self-check ----------
 
 def selftest(path):
+    game = load_prefs().get('game', '')
+    assert is_game_dir(game), 'Spielordner unbekannt: den Editor erst einmal normal starten'
     small = {2063: 3, 2069: 200, 2300: 0}
     assert decode_storage(*encode_storage(small, True)) == small and encode_storage(small, True)[0] == 'StrgSmll'
     assert encode_storage({2063: 300}, True)[0] == 'StrgLrg'
@@ -620,7 +782,7 @@ def selftest(path):
         packed = FileDB(content).tobytes()
         assert zlib.decompress(packed) == zlib.decompress(content), name
         assert packed[-12:] == content[-12:], name + ': Anhang nach dem zlib-Strom weicht ab'
-    names = game_names()
+    names = game_names(game)
     stores = s.storages(names)
     for lab, db, tag in stores:
         a = s.storage_attr(db, tag)
