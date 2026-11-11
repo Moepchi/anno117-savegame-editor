@@ -3,3 +3,6 @@ build/
 dist/
 *.spec
 __pycache__/
+
+# local dev notes (format docs, test log, to-do)
+STAND.md
