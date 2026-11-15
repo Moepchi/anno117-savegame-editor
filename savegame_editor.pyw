@@ -5,14 +5,14 @@ Speichert immer als neue Datei, das Original bleibt unangetastet. Formatnotizen:
   savegame_editor.pyw                       Fenster (Doppelklick)
   python savegame_editor.pyw --selftest X   prueft, dass Spielstand X unveraendert identisch neu geschrieben wird
 """
-import array, collections, functools, glob, hashlib, html, json, math, os, re, struct, subprocess, sys, tempfile, threading, time, unicodedata, urllib.request, webbrowser, zlib
+import array, collections, copy, functools, glob, hashlib, html, json, math, os, re, struct, subprocess, sys, tempfile, threading, time, unicodedata, urllib.request, webbrowser, zlib
 
 DATA = os.path.join(os.environ.get('APPDATA') or os.path.expanduser('~'), 'Anno117 Savegame-Editor')
 CACHE = os.path.join(DATA, 'namen_{}.json')  # game names per language
 PREFS = os.path.join(DATA, 'einstellungen.json')  # game folder, save folder, dark mode, language
 LANGS = {'de': ('Deutsch', 'german'), 'en': ('English', 'english')}  # code: (menu name, texts_<x>.xml)
 LANG = 'de'  # set by the window
-VERSION = '1.3.0'  # the GitHub release tag is 'v' + VERSION
+VERSION = '1.4.0'  # the GitHub release tag is 'v' + VERSION
 TITLE = f'Anno 117 Savegame-Editor {VERSION}'
 UPDATE_API = 'https://api.github.com/repos/Moepchi/anno117-savegame-editor/releases/latest'
 EXE = 'Anno117-Savegame-Editor.exe'  # release asset name
@@ -107,7 +107,35 @@ EN = {
         'Please choose the folder with your save games, usually Documents\\Anno 117 - Pax Romana.',
     'Ordner mit den Spielständen': 'Save game folder',
     'Spielstand öffnen, um zu beginnen.': 'Open a save game to begin.',
+    'Items': 'Items', 'Schiffe': 'Ships', 'Item': 'Item', 'Seltenheit': 'Rarity', 'Anzahl': 'Count',
+    'Laderaum': 'Hold', 'Inhalt': 'Content', 'leer': 'empty', 'Schiff': 'Ship', 'Laderaum {}': 'Hold {}',
+    'Gewöhnlich': 'Common', 'Ungewöhnlich': 'Uncommon', 'Selten': 'Rare', 'Episch': 'Epic', 'Legendär': 'Legendary',
+    'Einzigartig': 'Unique', 'Mythisch': 'Mythic', 'Alle': 'All', 'Insel-Items': 'Island items',
+    'Schiffs-Items': 'Ship items',
+    'Doppelklick legt Items ins Lager der Insel (eingelagert und ohne Wirkung, bis du sie im Spiel einsetzt).':
+        "Double-click puts items into the island's storage (stored and without effect until you use them in the game).",
+    'Wie viele „{}“ hinzufügen?': 'How many "{}" to add?',
+    'Doppelklick belädt einen Laderaum mit Waren (höchstens 50) oder einem Item.':
+        'Double-click loads a hold with goods (at most 50) or one item.',
+    'Menge (höchstens 50):': 'Amount (at most 50):',
+    'Modul': 'Module', 'Modul einbauen …': 'Add module …', 'Modul ausbauen': 'Remove module',
+    'Module (experimentell: neue Datei erst im Spiel testen)': 'Modules (experimental: test the new file in the game first)',
+    'Für dieses Schiff passt kein weiteres Modul.': 'No further module fits this ship.',
+    'Dieses Schiff hat keine Module.': 'This ship has no modules.',
+    'Erst ein Modul in der Liste auswählen.': 'Select a module in the list first.',
+    'In diesem Spielstand fehlt ein Vorbild für Module, hier kann der Editor keine einbauen.':
+        'This save has no example of a module, the editor cannot add any here.',
+    'Zusätzlicher Bedarf': 'Additional need', 'Zusätzliche Arbeitskraft': 'Additional workforce', 'statt': 'instead of',
+    'Immun gegen': 'Immune to', 'Erdbeben': 'Tremors', 'Krankheit': 'Disease', 'Seuche': 'Plague', 'Unruhen': 'Unrest',
+    'Diese Region hat noch nie ein Item gesehen, hier kann der Editor keine anlegen.':
+        'This region has never seen an item, the editor cannot create any here.',
+    'Diese Region hat noch nie Waren auf einem Schiff gesehen, hier kann der Editor keine laden.':
+        'This region has never seen goods on a ship, the editor cannot load any here.',
 }
+INCIDENTS = {'Tremors': 'Erdbeben', 'Disease': 'Krankheit', 'Plague': 'Seuche', 'Unrest': 'Unruhen', 'Rebellion': 'Rebellion'}
+RARITY_COLORS = {'Uncommon': '#3c9a3c', 'Rare': '#3b7dd8', 'Epic': '#a052d0', 'Legendary': '#e07b00', 'Unique': '#d0453a', 'Mythic': '#c08a10'}
+RARITY = {'Common': 'Gewöhnlich', 'Uncommon': 'Ungewöhnlich', 'Rare': 'Selten', 'Epic': 'Episch',
+          'Legendary': 'Legendär', 'Unique': 'Einzigartig', 'Mythic': 'Mythisch'}
 
 
 def t(text):
@@ -418,6 +446,178 @@ class Save:
         a[0], a[1] = db.ids[kind, True], value
         self.changed.add(db)
 
+    # ---------- items: island storage AreaManager_<AreaID>/AreaItemManager/AreaSlotContainer, registry ItemSessionManager ----------
+
+    def item_stores(self, names):
+        """[(label, db, AreaSlotContainer)] of the player's islands."""
+        return [(f'{self.area_name(db, area, names)} ({names["assets"].get(str(guid), guid)})', db, c)
+                for guid, _, db in self.sessions for v in self.areas(db).values() for aid, area in v if self.is_player(db, area)
+                for c in db.path('GameSessionManager', 'AreaManagers', f'AreaManager_{aid}', 'AreaItemManager', 'AreaSlotContainer')]
+
+    @staticmethod
+    def slots(db, cont):
+        """The Stack tags of a SlotList: index 1 = goods, 2 = items, 3 = empty."""
+        return [st for sl in db.tags(cont, 'SlotList') for s in sl[1] for st in db.tags(s, 'Stack')]
+
+    def item_stacks(self, db, cont):
+        """{item guid: inner Stack tag holding one None/{ID, GUID} per item}."""
+        out = {}
+        for st in self.slots(db, cont):
+            inner = db.attr(st, 'index')[1][0] == 2 and db.tags(db.tags(st, 'value')[0], 'Stack')[0]
+            if inner and inner[1]:
+                out[struct.unpack('<I', db.attr(inner[1][0], 'GUID')[1][:4])[0]] = inner
+        return out
+
+    def add_items(self, db, cont, guid, n, slot=None):
+        """n new items: registered in ItemMap (as stored, inactive items: no effect), stacked on the island,
+        or into one ship hold (slot) as cargo.
+        Item ID = SessionID << 58 | ItemIdCounter. ponytail: unique items are not checked, the game may keep only one."""
+        try:
+            A, T = (lambda x: db.ids[x, True]), (lambda x: db.ids[x, False])
+            A('ItemID'), A('EffectID'), A('ID'), A('GUID'), A('index'), T('QuestID'), T('BoostCondition'), T('Stack'), T('value')
+        except KeyError:
+            raise ValueError(t('Diese Region hat noch nie ein Item gesehen, hier kann der Editor keine anlegen.')) from None
+        sid = next(g for g, _, d in self.sessions if d is db)
+        g = None
+        for k in self.data.path('MetaGameManager', 'GameSessions')[0][1]:
+            if type(k[1]) is bytes:
+                g = struct.unpack('<I', k[1][:4])[0]
+            elif g == sid:
+                prefix = struct.unpack('<H', self.data.attr(self.data.tags(k, 'SessionDesc')[0], 'SessionID')[1][:2])[0]
+        ism = db.path('GameSessionManager', 'ItemSessionManager')[0]
+        counter, itemmap, gb = db.attr(ism, 'ItemIdCounter'), db.tags(ism, 'ItemMap')[0], struct.pack('<I', guid)
+        if slot is not None:  # a ship hold: becomes an item stack
+            if db.attr(slot, 'index')[1][0] != 2:
+                slot[1][:] = [[A('index'), struct.pack('<q', 2)], [T('value'), [[T('Stack'), []]]]]
+            stack = db.tags(db.tags(slot, 'value')[0], 'Stack')[0]
+        else:
+            stack = self.item_stacks(db, cont).get(guid)
+        if stack is None:
+            stack = [T('Stack'), []]
+            db.tags(cont, 'SlotList')[0][1].append([1, [[T('Stack'), [[A('index'), struct.pack('<q', 2)], [T('value'), [stack]]]]]])
+        for _ in range(n):
+            c = struct.unpack('<I', counter[1][:4])[0] + 1
+            counter[1] = struct.pack('<I', c)
+            iid = struct.pack('<q', prefix << 58 | c)
+            itemmap[1] += [[0x8000, iid], [1, [[A('ItemID'), iid], [A('GUID'), gb], [T('QuestID'), []], [A('EffectID'), bytes(8)], [T('BoostCondition'), []]]]]
+            stack[1].append([1, [[A('ID'), iid], [A('GUID'), gb]]])
+        self.changed.add(db)
+
+    # ---------- ships: objects with ShipModuleOwner in the AreaManagers, cargo in ItemContainer/SlotContainer ----------
+
+    def ships(self, names):
+        """[(label, db, ship object)] of the player's ships.
+        ponytail: a ship without OwnerProfile is taken as the player's (NPC ships carry one)."""
+        out = []
+        for guid, _, db in self.sessions:
+            for o in (o for ams in db.path('GameSessionManager', 'AreaManagers') for am in ams[1] if type(am[1]) is list
+                      for a in db.tags(am, 'AreaObjectManager') for g in db.tags(a, 'GameObject')
+                      for objs in db.tags(g, 'objects') for o in objs[1] if type(o[1]) is list):
+                if db.tags(o, 'ShipModuleOwner') and not db.attr(o, 'OwnerProfile') and db.tags(o, 'ItemContainer'):
+                    name = db.tags(o, 'Nameable') and db.attr(db.tags(o, 'Nameable')[0], 'VehicleTextGuid')
+                    name = name and names['texts'].get(str(struct.unpack('<q', name[1][:8])[0])) or t('Schiff')
+                    kind = names['assets'].get(str(struct.unpack('<i', db.attr(o, 'guid')[1][:4])[0]), '?')
+                    out.append((f'{name} ({kind}, {names["assets"].get(str(guid), guid)})', db, o))
+        return out
+
+    def cargo(self, db, ship):
+        """[(Stack tag, product guid or None, amount)] per cargo slot; a negative product = -item guid (an item stack)."""
+        out = []
+        for st in self.slots(db, db.tags(db.tags(ship, 'ItemContainer')[0], 'SlotContainer')[0]):
+            v, kind = db.tags(st, 'value')[0], db.attr(st, 'index')[1][0]
+            p, n = db.attr(v, 'ProductGUID'), db.attr(v, 'ProductCount')
+            items = kind == 2 and db.tags(v, 'Stack')[0][1]
+            out.append((st, -struct.unpack('<I', db.attr(items[0], 'GUID')[1][:4])[0] if items else None, len(items)) if kind == 2 else
+                       (st, struct.unpack('<I', p[1][:4])[0], struct.unpack('<i', n[1][:4])[0]) if kind == 1 and p and n else (st, None, 0))
+        return out
+
+    def set_cargo(self, db, st, product, amount):
+        """One cargo slot: goods (index 1) or empty (index 3). ponytail: amount capped at 50 (what the game loads per slot)."""
+        try:
+            A, T = (lambda x: db.ids[x, True]), (lambda x: db.ids[x, False])
+            value = ([[A('ProductGUID'), struct.pack('<I', product)], [A('ProductCount'), struct.pack('<i', min(amount, 50))]]
+                     if product and amount > 0 else [[A('UnitMetaObjectRef'), bytes(8)]])
+            if db.attr(st, 'index')[1][0] == 2:  # items on board: drop them from the ItemMap too
+                gone = {db.attr(i, 'ID')[1] for i in db.tags(db.tags(st, 'value')[0], 'Stack')[0][1]}
+                m = db.tags(db.path('GameSessionManager', 'ItemSessionManager')[0], 'ItemMap')[0]
+                m[1][:] = [x for k, v in zip(m[1][::2], m[1][1::2]) if k[1] not in gone for x in (k, v)]
+            st[1][:] = [[A('index'), struct.pack('<q', 1 if len(value) == 2 else 3)], [T('value'), value]]
+        except KeyError:
+            raise ValueError(t('Diese Region hat noch nie Waren auf einem Schiff gesehen, hier kann der Editor keine laden.')) from None
+        self.changed.add(db)
+
+    # ---------- ship modules (rudder, mast, hull, weapons): ShipModuleOwner/InstalledShipModules ----------
+    # A module with a buff carries an EffectId, registered in data's MetaEffectManager/LocalEffects under the ship's ID.
+    # ponytail: experimental, the session's BinaryData blob also lists effect ids and is left alone; the game is
+    # expected to rebuild it from LocalEffects. Weapons (no buff) need nothing else, their crews are not stored.
+
+    @staticmethod
+    def modules(db, ship):
+        """[(entry, module guid)] of a ship."""
+        return [(m, struct.unpack('<I', db.attr(m, 'ShipModuleGuid')[1][:4])[0])
+                for o in db.tags(ship, 'ShipModuleOwner') for ims in db.tags(o, 'InstalledShipModules') for m in ims[1]]
+
+    @staticmethod
+    def module_choices(rules, have):
+        """Modules that may still go onto a ship: under the per-type and total maximum, with a free hull place.
+        rules = names['shipmods'][ship type], have = installed module guids."""
+        most, mods, places = rules
+        kind = {m: k for k, m, _ in mods}
+
+        def fits(places, kinds):  # every module on its own hull place that supports its type
+            return not kinds or any(kinds[0] in p and fits(places[:i] + places[i + 1:], kinds[1:]) for i, p in enumerate(places))
+        return [m for k, m, n in mods if have.count(m) < n and len(have) < most and fits(places, [kind.get(h) for h in have] + [k])]
+
+    def effects(self):
+        return self.data.path('MetaGameManager', 'MetaEffectManager', 'LocalEffects')[0]
+
+    def add_module(self, db, ship, guid, modfx):
+        try:
+            A, T = (lambda x: db.ids[x, True]), (lambda x: db.ids[x, False])
+            entry = [1, [[A('ShipModuleGuid'), struct.pack('<I', guid)], [T('EffectId'), []]]]
+            own = db.tags(ship, 'ShipModuleOwner')[0]
+            ims = db.tags(own, 'InstalledShipModules') or [own[1].append([T('InstalledShipModules'), []]) or own[1][-1]]
+            if guid in modfx:
+                d, le = self.data, self.effects()
+                sample = next(e for lst in le[1][1::2] for e in lst[1] if struct.unpack('<I', d.attr(e, 'Guid')[1][:4])[0] in modfx)
+                mgr = d.path('MetaGameManager', 'MetaEffectManager')[0]
+                n = struct.unpack('<q', d.attr(mgr, 'NextEffectIndex')[1])[0]
+                d.attr(mgr, 'NextEffectIndex')[1] = struct.pack('<q', n + 1)
+                eid, key = struct.pack('<Q', 1 << 63 | n), db.attr(ship, 'ID')[1]
+                new = copy.deepcopy(sample)
+                d.attr(new, 'Guid')[1], d.attr(new, 'Id')[1] = struct.pack('<I', guid), eid
+                d.attr(d.tags(new, 'Source')[0], 'ObjectID')[1] = key
+                lst = next((lst for k, lst in zip(le[1][::2], le[1][1::2]) if k[1] == key), None)
+                if lst is None:
+                    le[1] += [[le[1][0][0], key], lst := [le[1][1][0], []]]
+                lst[1].append(new)
+                entry[1][1][1].append([A('value'), eid])
+                self.changed.add(d)
+        except (KeyError, StopIteration, IndexError):
+            raise ValueError(t('In diesem Spielstand fehlt ein Vorbild für Module, hier kann der Editor keine einbauen.')) from None
+        ims[0][1].append(entry)
+        self.changed.add(db)
+
+    def remove_module(self, db, ship, entry):
+        for o in db.tags(ship, 'ShipModuleOwner'):
+            for ims in db.tags(o, 'InstalledShipModules'):
+                if entry in ims[1]:
+                    ims[1].remove(entry)
+        eid = db.attr(db.tags(entry, 'EffectId')[0], 'value')
+        if eid:  # its buff goes too
+            le, d = self.effects(), self.data
+            pairs = []
+            for k, lst in zip(le[1][::2], le[1][1::2]):
+                lst[1][:] = [e for e in lst[1] if (d.attr(e, 'Id') or [0, b''])[1] != eid[1]]
+                pairs += [k, lst] if lst[1] else []
+            le[1][:] = pairs
+            self.changed.add(d)
+        self.changed.add(db)
+
+    def goods(self, names):
+        """Goods for ship cargo: everything the player's island warehouses know (no Denare, influence and the like)."""
+        return sorted({g for _, db, tag in self.storages(names)[len(self.empire()):] for g in self.storage(db, tag)})
+
     def write(self, path):
         # The load menu reads meta.a7s + header.a7s: give the copy its own name, save time and current Denare.
         # (A copy with the original's exact save time did not show up in the menu.)
@@ -454,7 +654,7 @@ def game_names(game, lang='de'):
     try:
         with open(cache_file, encoding='utf-8') as f:
             cache = json.load(f)
-        if cache['stamp'] == stamp and 'icons' in cache:
+        if cache['stamp'] == stamp and 'modfx' in cache:
             return cache
     except (OSError, ValueError, KeyError):
         pass
@@ -469,7 +669,9 @@ def game_names(game, lang='de'):
                     break
     clean = lambda t: re.sub(r'<[^>]*>', '', html.unescape(t)).strip()
     texts = {k: clean(v) for k, v in re.findall(r'<LineId>(-?\d+)</LineId>\s*<Text>(.*?)</Text>', raw['texts'], re.S)}
-    assets, descs, menus, slots, icons = {}, {}, {}, {}, {}
+    assets, descs, menus, slots, icons, items = {}, {}, {}, {}, {}, []
+    item_chunks, parts, shipitems = {}, {}, []  # items; their buffs and target pools; items for ships (captains)
+    shipmods, modfx = {}, []  # ship type → [most modules, [[type, module, most of it]], hull places]; modules with a buff
     for chunk in raw['assets'].split('<Asset>'):
         if '<Template>Fertility</Template>' in chunk and '<LimitedLodeMaximum>' not in chunk:  # limited lodes have an amount
             need, g = re.search(r'<NeedsSlot>(\w+)<', chunk), re.search(r'<GUID>(\d+)</GUID>', chunk).group(1)
@@ -483,6 +685,24 @@ def game_names(game, lang='de'):
         d = '<Template>Product</Template>' in chunk and re.search(r'<InfoDescription>(-?\d+)<', chunk)
         if g and d and texts.get(d.group(1)):
             descs[g.group(1)] = texts[d.group(1)]  # tooltip text for goods
+        tpl = re.search(r'<Template>(\w+)</Template>', chunk)
+        tpl = tpl and tpl.group(1)
+        if g and g.group(1) in assets and tpl in ('Item', 'ItemWithBoost', 'ItemWithUI'):
+            r = re.search(r'<Rarity>(\w+)<', chunk)
+            items.append([int(g.group(1)), r.group(1) if r else 'Common'])
+            item_chunks[g.group(1)] = chunk
+            if '<Allocation>Ship</Allocation>' in chunk:
+                shipitems.append(int(g.group(1)))
+        conf = g and re.search(r'<ShipModulesConfig>(.*?)</ShipModulesConfig>', chunk, re.S)
+        if conf:
+            most = re.search(r'<MaximumModificationCount>(\d+)<', chunk)
+            shipmods[g.group(1)] = [int(most.group(1)) if most else 99, [[k, int(m), int(n or 1)] for k, m, n in re.findall(
+                r'<(\w+)>\s*<ModuleAsset>(\d+)</ModuleAsset>\s*(?:<MaximumModuleCount>(\d+)</MaximumModuleCount>)?', conf.group(1))
+                if m in assets], [p.split(';') for p in re.findall(r'<SupportsModuleSlots>([^<]*)<', chunk)]]
+        if g and tpl == 'ShipModule' and '<Buffs>' in chunk:
+            modfx.append(int(g.group(1)))
+        if g and tpl and (tpl.endswith('Buff') or tpl in ('AssetPool', 'Effect')):
+            parts[g.group(1)] = chunk
         if g and '<Template>SettingsMenu</Template>' in chunk:
             menus[g.group(1)] = chunk
 
@@ -517,12 +737,141 @@ def game_names(game, lang='de'):
     # fertilities in the order of the game's map legend, with the slot they need (Mountain/River/Marsh or '')
     legend = re.findall(r'<GUID>(\d+)</GUID>', re.search(r'<FertilityOrder>.*?</FertilityOrder>', raw['assets'], re.S).group(0))
     ferts = [[int(g), slots[g]] for g in legend if g in slots]
+    keys = {k: texts.get(v, '') for k, v in re.findall(r'<(\w+Key)>(-?\d+)<', re.search(
+        r'<ItemKeywords>.*?</ItemKeywords>', raw['assets'], re.S).group(0))}
+    keys.update((k + 'Key', texts.get(v, '')) for k, v in re.findall(r'<(\w+)>\s*<Name>(-?\d+)</Name>', re.search(
+        r'<NeedAttributeConfig>.*?</NeedAttributeConfig>', raw['assets'], re.S).group(0)))  # Prestige, Happiness, …
+    itemtips = {g: item_tip(c, parts, assets, texts, keys) for g, c in item_chunks.items()}
     cache = {'stamp': stamp, 'texts': texts, 'assets': assets, 'descs': descs, 'settings': settings, 'menu': menu,
-             'ferts': ferts, 'icons': icons}
+             'ferts': ferts, 'icons': icons, 'items': items, 'itemtips': itemtips, 'shipitems': shipitems,
+             'shipmods': shipmods, 'modfx': modfx}
     os.makedirs(DATA, exist_ok=True)
     with open(cache_file, 'w', encoding='utf-8') as f:
         json.dump(cache, f, ensure_ascii=False)
     return cache
+
+
+# upgrades whose item keyword (the game's label) is named differently: (upgrade name start, keyword)
+UPGRADE_KEYS = [('BaseHealth', 'HealthMaxHitpointsUpgradeKey'), ('BuffBaseSpeed', 'MovementBaseSpeedKey'),
+                ('BuffReduceCargoImpact', 'MovementCargoImpactKey'), ('BuffTransferSpeed', 'MovementTransferSpeedUpgradeKey'),
+                ('BuffReduceDamageImpact', 'MovementDamageImpactKey'), ('BuffFavorableWindAngle', 'MovementFavorableWindAngleUpgradeKey'),
+                ('BuffReduceNegativeWindImpact', 'MovementNegativeWindImpactKey'), ('Offense', 'UnitOffenseUpgradeKey'),
+                ('AttackSpeed', 'UnitAttackSpeedUpgradeKey'), ('Accuracy', 'UnitAccuracyUpgradeKey'),
+                ('DistanceAttackRange', 'UnitDistanceAttackRangeUpgradeKey'), ('AttackCone', 'UnitAttackConeBallistaUpgradeKey'),
+                ('NeededArea', 'FactoryNeededAreaPercentageUpgradeKey'), ('ResolverResolve', 'CityInstitutionResolveDurationUpgradeKey'),
+                ('ResolverRepair', 'CityInstitutionRepairDurationUpgradeKey'), ('FuelDuration', 'FactoryFuelDurationKey'),
+                ('AdditionalLoadingSpeed', 'WarehouseLoadingSpeedKey'), ('ConsumptionModifier', 'ResidenceConsumptionModifierKey'),
+                ('DistributorConsumedWater', 'AqueductConsumedWaterUpgradeKey'),
+                # no keyword: a text line of the game instead
+                ('BuffReduceNegativeRiverCurrent', '-6903205918667571422'), ('OverflowStorageRisk', '-6904080040691355413')]
+
+
+def item_tip(chunk, parts, assets, texts, keys):
+    """An item's tooltip: its description, then per effect what it acts on and the values of its buffs, labelled with
+    the game's item keywords; area effects of a buff are followed, goods it adds or replaces are named, then the boost
+    (when its condition holds) and the island-wide mythic effect. ponytail: the boost condition itself shows only as the
+    game's hint text."""
+    out = []
+
+    def label(group, short):
+        alias = next((k for p, k in UPGRADE_KEYS if short.startswith(p)), '')
+        found = next((keys[k] for k in (group + short + 'UpgradeKey', group + short + 'Key', short + 'Key', short + 'UpgradeKey',
+                                        alias, group + short.replace('Factor', 'Amount') + 'UpgradeKey', group + 'UpgradeKey')
+                      if keys.get(k)), None) or texts.get(alias)
+        return (found or re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', short)).rstrip(':')
+    d = re.search(r'<InfoDescription>(-?\d+)<', chunk)
+    if d and texts.get(d.group(1)):
+        out.append(texts[d.group(1)])
+
+    mark = [0]  # where the current section starts: lines repeat only across sections
+
+    def effect(chunk, depth, boost=None):
+        eff = re.search(r'<Effect>(.*?)</Effect>', chunk, re.S)
+        eff = eff.group(1) if eff else ''
+        sec = lambda tag: re.findall(r'<GUID>(\d+)</GUID>', (re.search(rf'<{tag}>(.*?)</{tag}>', eff, re.S) or re.match('', '')).group(0))
+        on = []
+        for g in sec('Targets'):  # a pool lists its members
+            on += [assets[g]] if g in assets else [assets[m] for m in re.findall(r'<Asset>(\d+)<', parts.get(g, '')) if m in assets]
+        on = list(dict.fromkeys(on))
+        if on and boost is None:
+            out.append('→ ' + ', '.join(on[:5]) + (' …' if len(on) > 5 else ''))
+        for b in boost or sec('Buffs'):
+            for group, body in re.findall(r'<(\w+)Upgrade>(.*?)</\1Upgrade>', parts.get(b, ''), re.S):
+                vals = [(m.group(1), m.group(2), m.group(3), m.start()) for m in re.finditer(
+                    r'<(\w+)>\s*<Value>(-?[\d.]+)</Value>\s*(?:<Percental>(\d)</Percental>)?', body)]
+                vals += [(m.group(1), m.group(2), '1', m.start()) for m in re.finditer(  # plain percentages
+                    r'<(\w+Percent)>(-?[\d.]+)</\1>', body) if m.group(1) not in ('FertilityPercent', 'AmountInPercent')]
+                for tag, v, pc, at in vals:
+                    if tag == 'Amount' and group == 'AreaMaintenance':  # workforce amounts: named below
+                        continue
+                    if tag == 'AmountOrPercent':  # named after the tag around it (an attribute such as Prestige)
+                        tag = (re.findall(r'<(\w+)>', body[:at]) or [tag])[-1]
+                    short = tag.replace('Upgrade', '')
+                    line = f'{label(group, short)}: {float(v):+g}' + (
+                        ' %' if pc == '1' or 'Percent' in tag or short == 'Productivity' else '')
+                    if line not in out[mark[0]:]:
+                        out.append(line)
+                # goods: extra output, needs covered, inputs replaced, added fertility
+                good = lambda g: assets.get(g, f'GUID {g}')
+                extra = [f'{good(p)} ({a}× / {c})' for p, c, a in re.findall(
+                    r'<Product>(\d+)</Product>\s*<AdditionalOutputCycle>(\d+)</AdditionalOutputCycle>\s*<Amount>(\d+)<', body)]
+                extra += [f'{a}× / {c}' for c, a in re.findall(  # more of what the building makes anyway
+                    r'<ForceProductSameAsFactoryOutput>1<\S+\s*<AdditionalOutputCycle>(\d+)</AdditionalOutputCycle>\s*<Amount>(\d+)<', body)]
+                num = lambda v: f'{float(v):+g}'
+                if group == 'AttributeFromAttributes':  # e.g. income from knowledge
+                    for a, b, v in re.findall(r'<(\w+)>\s*<FromOtherAttribute>\s*<(\w+)>\s*<AttributeFromAttributePercentage>(-?[\d.]+)<', body):
+                        line = f'{keys.get(a + "Key", a)}: {num(v)} % ← {keys.get(b + "Key", b)}'
+                        if line not in out[mark[0]:]:
+                            out.append(line)
+                aw = re.search(r'<AdditionalWorkforces>(.*?)</AdditionalWorkforces>', body, re.S)
+                for key, what in (
+                        ('GoodConsumption', [f'{good(g)} {num(v)} %' for g, v in re.findall(
+                            r'<ProvidedNeedProduct>(\d+)</ProvidedNeedProduct>\s*<AmountInPercent>(-?[\d.]+)<', body)]),
+                        ('NeedProvideNeed', [good(g) for g in re.findall(r'<ProvidedProduct>(\d+)<', body)]),
+                        (t('Zusätzlicher Bedarf'), [good(g) for g in re.findall(r'<Need>(\d+)<', body)]),
+                        ('Workforce', [f'{good(g)} {num(v)}' for g, v in re.findall(
+                            r'<WorkforceGUID>(\d+)</WorkforceGUID>\s*<Amount>\s*<Value>(-?[\d.]+)<', body)]),
+                        (t('Zusätzliche Arbeitskraft'), [good(g) for g in re.findall(r'<WorkforceGUID>(\d+)<', aw.group(1))] if aw else []),
+                        ('ReplacingWorkforce', [f'{good(b)} ({t("statt")} {good(a)})' for a, b in re.findall(
+                            r'<OldWorkforce>(\d+)</OldWorkforce>\s*<NewWorkforce>(\d+)<', body)]),
+                        ('Reward', [f'{ra}× {good(rp)} ← {sa}× {good(sp)}' for rp, ra, sp, sa in re.findall(
+                            r'<RewardProduct>(\d+)</RewardProduct>\s*<RewardAmount>(\d+)</RewardAmount>\s*'
+                            r'<SoldProduct>(\d+)</SoldProduct>\s*<SoldAmount>(\d+)<', body)]),
+                        ('Profit', [num(v) + ' %' for v in re.findall(r'<PassiveTradeProfitModifier>(-?[\d.]+)<', body)]),
+                        ('StorageCapacityModifier', [num(v) for v in re.findall(r'<StorageCapacityModifier>(-?[\d.]+)<', body)]),
+                        (t('Immun gegen'), [t(INCIDENTS.get(x, x)) for v in re.findall(r'<IncidentImmunity>(.*?)<', body)
+                                            for x in v.split(';')])):
+                    line = what and f'{label(group, key) if key.isascii() and key.isidentifier() else key}: ' + ', '.join(what)
+                    if line and line not in out[mark[0]:]:
+                        out.append(line)
+                for key in ('UseMeadow', 'UseForest'):  # yes/no abilities: the label alone
+                    if f'<Can{key}>1<' in body and label(group, key) not in out[mark[0]:]:
+                        out.append(label(group, key))
+                for key, what in (('AdditionalOutput', extra),
+                                  ('ProvidedNeedUpgrade', [good(g) for g in re.findall(r'<ProvidedNeed>(\d+)<', body)]),
+                                  ('ReplaceInputs', [f'{good(a)} → {good(b)}' for a, b in re.findall(
+                                      r'<OldInput>(\d+)</OldInput>\s*<NewInput>(\d+)<', body)]),
+                                  ('AddedFertility', [good(g) for g in re.findall(r'<AddedFertility>(\d+)<', body)])):
+                    line = what and f'{label(group, key)}: ' + ', '.join(what)
+                    if line and line not in out[mark[0]:]:
+                        out.append(line)
+                for e in re.findall(r'<AdditionalFunctionalEffect>(\d+)<', body):
+                    if depth < 3 and e in parts:
+                        effect(parts[e], depth + 1)
+
+    effect(chunk, 0)
+    boost = re.search(r'<BoostBuffs>(.*?)</BoostBuffs>', chunk, re.S)  # when the item's condition holds (a cult, …)
+    if boost:
+        hint = re.search(r'<BoostHint>(-?\d+)<', chunk)
+        out.append('★ ' + (texts.get(hint.group(1), '') if hint else ''))
+        mark[0] = len(out)
+        effect(chunk, 1, re.findall(r'<GUID>(\d+)</GUID>', boost.group(1)))
+    myth = re.search(r'<NeededPrestige>(\d+)</NeededPrestige>\s*<MythicEffect>(\d+)<', chunk)  # island-wide from some prestige
+    if myth and myth.group(2) in parts:
+        out.append(f'★ {keys.get("PrestigeKey") or "Prestige"} ≥ {myth.group(1)}:')
+        mark[0] = len(out)
+        effect(parts[myth.group(2)], 1)
+    return '\n'.join(out)
 
 
 def rda_dir(f):
@@ -915,7 +1264,7 @@ def run_ui():
     root.geometry('860x660')
     root.report_callback_exception = lambda typ, err, tb: messagebox.showerror(TITLE, f'{typ.__name__}: {err}')
     status = tk.StringVar(value=t('Lade Namen aus den Spieldateien …'))
-    s = {'save': None, 'storages': [], 'regions': [], 'maps': {}, 'dots': {}}
+    s = {'save': None, 'storages': [], 'regions': [], 'maps': {}, 'dots': {}, 'items': [], 'ships': []}
     names = {'descs': {}}  # game names; loaded once the game folder is known (the tooltip may fire before)
     texts = []  # (widget, German text), re-translated when the language changes
 
@@ -994,6 +1343,36 @@ def run_ui():
     cv.pack(fill='both', expand=True, pady=(6, 0))
     SLOT = {'Mountain': 'Berg', 'River': 'Fluss', 'Marsh': 'Sumpf'}
 
+    tab4 = ttk.Frame(nb, padding=6)
+    nb.insert(1, tab4, text=t('Items'))
+    top4 = ttk.Frame(tab4)
+    top4.pack(fill='x')
+    isle = ttk.Combobox(top4, state='readonly', width=60)
+    isle.pack(side='left', padx=(0, 10))
+    item_kind = tk.IntVar(value=0)  # 0 all, 1 island items, 2 ship items
+    for k, text in enumerate(('Alle', 'Insel-Items', 'Schiffs-Items')):
+        tr(ttk.Radiobutton(top4, variable=item_kind, value=k, command=lambda: show_items()), text).pack(side='left', padx=(0, 6))
+    item_match = search(top4, lambda: show_items())
+    itemtv = table(tab4, ('Item', 'Seltenheit', 'Anzahl'), (440, 160, 100))
+    for r, c in RARITY_COLORS.items():  # mid tones, readable on light and dark
+        itemtv.tag_configure(r, foreground=c)
+    tr(ttk.Label(tab4), 'Doppelklick legt Items ins Lager der Insel (eingelagert und ohne Wirkung, bis du sie im Spiel einsetzt).').pack(anchor='w')
+
+    tab5 = ttk.Frame(nb, padding=6)
+    nb.insert(2, tab5, text=t('Schiffe'))
+    ship = ttk.Combobox(tab5, state='readonly', width=60)
+    ship.pack(anchor='w')
+    cargo = table(tab5, ('Laderaum', 'Inhalt', 'Menge'), (100, 440, 160))
+    cargo.column('Inhalt', anchor='w')
+    tr(ttk.Label(tab5), 'Doppelklick belädt einen Laderaum mit Waren (höchstens 50) oder einem Item.').pack(anchor='w')
+    tr(ttk.Label(tab5), 'Module (experimentell: neue Datei erst im Spiel testen)').pack(anchor='w', pady=(8, 0))
+    modtv = table(tab5, ('Modul',), (700,))
+    modtv.configure(height=5)
+    bar5 = ttk.Frame(tab5)
+    bar5.pack(anchor='w')
+    tr(ttk.Button(bar5, command=lambda: add_module()), 'Modul einbauen …').pack(side='left')
+    tr(ttk.Button(bar5, command=lambda: remove_module()), 'Modul ausbauen').pack(side='left', padx=6)
+
     # sorting: click a heading → ascending, again → descending, a third time → original order
     order = {}  # table → (column, descending)
 
@@ -1035,9 +1414,9 @@ def run_ui():
         if tv in order:
             resort(tv)
         elif s['save']:
-            {goods: show_storage, sets: show_settings}[tv]()
+            {goods: show_storage, sets: show_settings, itemtv: show_items, cargo: show_cargo, modtv: show_modules}[tv]()
 
-    for tv in (goods, sets):
+    for tv in (goods, sets, itemtv, cargo, modtv):
         heads(tv)
 
     def dirty():
@@ -1068,6 +1447,120 @@ def run_ui():
         dirty()
         show_storage()
         goods.selection_set(rows)
+
+    def fill_box(box, rows, i=0):
+        box['values'] = [x[0] for x in rows]
+        box.current(min(max(i, 0), len(rows) - 1)) if rows else box.set('')
+
+    def show_items(*_):
+        itemtv.delete(*itemtv.get_children())
+        if not s['items']:
+            return
+        _, db, cont = s['items'][isle.current()]
+        have = {g: len(st[1]) for g, st in s['save'].item_stacks(db, cont).items()}
+        rarity = {g: r for g, r in names['items']}
+        ship_items = set(names['shipitems'])
+        for g in sorted(set(rarity) | set(have), key=lambda g: (g not in have, names['assets'].get(str(g), ''))):
+            name, r = names['assets'].get(str(g), f'GUID {g}'), t(RARITY.get(rarity.get(g), ''))
+            if item_match(name, r, g) and item_kind.get() in (0, 2 if g in ship_items else 1):
+                itemtv.insert('', 'end', iid=str(g), values=(name, r, have.get(g, '')), tags=(rarity.get(g, 'Common'),))
+        resort(itemtv)
+
+    def add_item(g):
+        _, db, cont = s['items'][isle.current()]
+        n = simpledialog.askinteger(TITLE, t('Wie viele „{}“ hinzufügen?').format(itemtv.set(g, 'Item')),
+                                    initialvalue=1, minvalue=1, maxvalue=99, parent=root)
+        if not n:
+            return
+        try:
+            s['save'].add_items(db, cont, int(g), n)
+        except ValueError as e:
+            status.set(str(e))
+            return
+        dirty()
+        show_items()
+        if itemtv.exists(g):
+            itemtv.selection_set(g)
+            itemtv.see(g)
+
+    def show_cargo(*_):
+        cargo.delete(*cargo.get_children())
+        if not s['ships']:
+            return
+        _, db, o = s['ships'][ship.current()]
+        for i, (_, p, n) in enumerate(s['save'].cargo(db, o)):
+            what = t('leer') if p is None else names['assets'].get(str(abs(p)), f'GUID {abs(p)}')
+            cargo.insert('', 'end', iid=str(i), values=(i + 1, what, n or ''))
+        resort(cargo)
+
+    def ship_rules():
+        _, db, o = s['ships'][ship.current()]
+        return db, o, names['shipmods'].get(str(struct.unpack('<i', db.attr(o, 'guid')[1][:4])[0]))
+
+    def show_modules():
+        modtv.delete(*modtv.get_children())
+        if s['ships']:
+            db, o, _ = ship_rules()
+            for i, (_, g) in enumerate(Save.modules(db, o)):
+                modtv.insert('', 'end', iid=str(i), values=(names['assets'].get(str(g), f'GUID {g}'),))
+            resort(modtv)
+
+    def add_module():
+        if not s['ships']:
+            return
+        db, o, rules = ship_rules()
+        free = rules and Save.module_choices(rules, [g for _, g in Save.modules(db, o)])
+        if not free:
+            status.set(t('Für dieses Schiff passt kein weiteres Modul.'))
+            return
+        k = choose(t('Modul einbauen …'), [names['assets'].get(str(g), f'GUID {g}') for g in free], 0)
+        if k is None:
+            return
+        try:
+            s['save'].add_module(db, o, free[k], names['modfx'])
+        except ValueError as e:
+            status.set(str(e))
+            return
+        dirty()
+        show_modules()
+
+    def remove_module():
+        if not s['ships']:
+            return
+        db, o, _ = ship_rules()
+        mods, sel = Save.modules(db, o), modtv.selection()
+        if not mods or not sel:
+            status.set(t('Dieses Schiff hat keine Module.') if not mods else t('Erst ein Modul in der Liste auswählen.'))
+            return
+        s['save'].remove_module(db, o, mods[int(sel[0])][0])
+        dirty()
+        show_modules()
+
+    def edit_cargo(i):
+        _, db, o = s['ships'][ship.current()]
+        st, p, n = s['save'].cargo(db, o)[int(i)]
+        by_name = lambda g: names['assets'].get(str(abs(g)), '')
+        # goods, then items (as negative guids, like cargo() reports them)
+        wares = sorted(s['save'].goods(names), key=by_name) + sorted((-g for g, _ in names['items']), key=by_name)
+        k = choose(t('Laderaum {}').format(int(i) + 1), [t('leer')] + [
+            (names['assets'].get(str(g), f'GUID {g}') if g > 0 else 'Item: ' + by_name(g)) for g in wares],
+            wares.index(p) + 1 if p in wares else 0)
+        w = k and wares[k - 1]
+        # ponytail: one item per hold, how many the game stacks on a ship is unknown
+        amount = 1 if w and w < 0 else k and simpledialog.askinteger(
+            TITLE, t('Menge (höchstens 50):'), initialvalue=n or 50, minvalue=1, maxvalue=50, parent=root)
+        if k is None or amount is None:
+            return
+        try:
+            s['save'].set_cargo(db, st, w if w and w > 0 else None, amount)
+            if w and w < 0:
+                s['save'].add_items(db, None, -w, 1, slot=st)
+        except ValueError as e:
+            status.set(str(e))
+            return
+        dirty()
+        show_cargo()
+        cargo.selection_set(i)
 
     # region map in the game's 45° view: island images from the game files, rendered in the background.
     # The wheel zooms, dragging moves the map, a click opens the fertility window.
@@ -1336,16 +1829,35 @@ def run_ui():
         win.title(title)
         win.transient(root)
         win.grab_set()
-        lb = tk.Listbox(win, height=len(options), width=45, exportselection=False)
-        for o in options:
-            lb.insert('end', o)
-        if current < len(options):
-            lb.selection_set(current)
-        lb.pack(padx=10, pady=10)
+        text, shown = tk.StringVar(), []
+        if len(options) > 20:  # long lists (goods) get a search field and a scrollbar
+            entry = ttk.Entry(win, textvariable=text)
+            entry.pack(fill='x', padx=10, pady=(10, 0))
+            entry.focus_set()
+        frame = ttk.Frame(win)
+        frame.pack(padx=10, pady=10, fill='both', expand=True)
+        lb = tk.Listbox(frame, height=min(len(options), 20), width=45, exportselection=False)
+        if len(options) > 20:
+            sb = ttk.Scrollbar(frame, command=lb.yview)
+            lb.configure(yscrollcommand=sb.set)
+            sb.pack(side='right', fill='y')
+        lb.pack(side='left', fill='both', expand=True)
+
+        def fill(*_):
+            shown[:] = [i for i, o in enumerate(options) if text.get().strip().casefold() in o.casefold()]
+            lb.delete(0, 'end')
+            for i in shown:
+                lb.insert('end', options[i])
+            if current in shown:
+                lb.selection_set(shown.index(current))
+                lb.see(shown.index(current))
+
+        text.trace_add('write', fill)
+        fill()
         res = []
 
         def ok(*_):
-            res.extend(lb.curselection())
+            res.extend(shown[i] for i in lb.curselection())
             win.destroy()
 
         lb.bind('<Double-1>', ok)
@@ -1381,14 +1893,19 @@ def run_ui():
         root.update()
         save = Save(path)
         view['zoom'] = 1
-        s.update(save=save, storages=save.storages(names), maps={}, dots={},
+        s.update(save=save, storages=save.storages(names), maps={}, dots={}, items=save.item_stores(names), ships=save.ships(names),
                  regions=[(g, db) for g, _, db in save.sessions if db.path('GameSessionManager', 'MapTemplate')])
         pick['values'] = [x[0] for x in s['storages']]
         pick.current(0)
         region['values'] = [names['assets'].get(str(g), g) for g, _ in s['regions']]
         region.current(0)
+        fill_box(isle, s['items'])
+        fill_box(ship, s['ships'])
         show_storage()
         show_settings()
+        show_items()
+        show_cargo()
+        show_modules()
         save_btn['state'] = 'normal'
         root.title(TITLE)
         status.set(t('Geladen: {}').format(path))
@@ -1415,6 +1932,10 @@ def run_ui():
     save_btn = tr(ttk.Button(bar, command=save_as, state='disabled'), 'Speichern unter …')
     save_btn.pack(side='left', padx=6)
     pick.bind('<<ComboboxSelected>>', show_storage)
+    isle.bind('<<ComboboxSelected>>', show_items)
+    ship.bind('<<ComboboxSelected>>', lambda e: (show_cargo(), show_modules()))
+    itemtv.bind('<Double-1>', lambda e: (r := itemtv.identify_row(e.y)) and add_item(r))
+    cargo.bind('<Double-1>', lambda e: (r := cargo.identify_row(e.y)) and edit_cargo(r))
     region.bind('<<ComboboxSelected>>', lambda e: (view.update(zoom=1), draw_map()))
     cv.bind('<Configure>', lambda e: (view['timer'] and root.after_cancel(view['timer']), view.update(timer=root.after(300, draw_map))))
     cv.bind('<Motion>', map_hover)
@@ -1429,18 +1950,20 @@ def run_ui():
     tip = tk.Label(root, bg='#ffffe1', fg='black', relief='solid', bd=1, wraplength=340, justify='left', padx=6, pady=3)
 
     def hover(e):
-        text = names['descs'].get(goods.identify_row(e.y))
+        text = names['descs' if e.widget is goods else 'itemtips'].get(e.widget.identify_row(e.y))
         if not text:
             tip.place_forget()
             return
         tip.config(text=text)
         tip.update_idletasks()
         x = min(e.x_root - root.winfo_rootx() + 16, root.winfo_width() - tip.winfo_reqwidth() - 4)
-        tip.place(x=max(x, 0), y=e.y_root - root.winfo_rooty() + 16)
+        y = e.y_root - root.winfo_rooty() + 16
+        tip.place(x=max(x, 0), y=y if y + tip.winfo_reqheight() < root.winfo_height() else max(y - 32 - tip.winfo_reqheight(), 0))
         tip.lift()
 
-    goods.bind('<Motion>', hover)
-    goods.bind('<Leave>', lambda e: tip.place_forget())
+    for tv in (goods, itemtv):
+        tv.bind('<Motion>', hover)
+        tv.bind('<Leave>', lambda e: tip.place_forget())
     sets.bind('<Double-1>', lambda e: (r := sets.identify_row(e.y)) and r in s['save'].refs and edit_setting(r))  # not on group rows
 
     dark = tk.BooleanVar(value=prefs.get('dark', windows_dark()))
@@ -1490,7 +2013,9 @@ def run_ui():
         nb.tab(tab1, text=t('Denare & Lager'))
         nb.tab(tab2, text=t('Spieleinstellungen'))
         nb.tab(tab3, text=t('Fruchtbarkeiten'))
-        for tv in (goods, sets):
+        nb.tab(tab4, text=t('Items'))
+        nb.tab(tab5, text=t('Schiffe'))
+        for tv in (goods, sets, itemtv, cargo, modtv):
             heads(tv)
         status.set(t('Lade Namen aus den Spieldateien …'))
         root.update()
@@ -1503,8 +2028,15 @@ def run_ui():
         pick['values'] = [x[0] for x in s['storages']]
         pick.current(i)
         region['values'] = [names['assets'].get(str(g), g) for g, _ in s['regions']]
+        i, j = isle.current(), ship.current()
+        s.update(items=s['save'].item_stores(names), ships=s['save'].ships(names))
+        fill_box(isle, s['items'], i)
+        fill_box(ship, s['ships'], j)
         show_storage()
         show_settings()
+        show_items()
+        show_cargo()
+        show_modules()
         status.set(t('Geladen: {}').format(s['save'].path))
         draw_map()
 
@@ -1546,7 +2078,7 @@ def run_ui():
             style.theme_use(light_theme)
         root.configure(bg=bg if d else 'SystemButtonFace')
         tip.configure(bg='#3a3a3a' if d else '#ffffe1', fg=fg if d else 'black')
-        for box in (pick, region, lang_box):  # combobox drop-down lists are plain tk listboxes
+        for box in (pick, region, lang_box, isle, ship):  # combobox drop-down lists are plain tk listboxes
             try:
                 pop = root.tk.eval(f'ttk::combobox::PopdownWindow {box}')
                 root.tk.call(f'{pop}.f.l', 'configure', '-background', field if d else 'SystemWindow',
@@ -1686,6 +2218,69 @@ def selftest(path):
     assert Save.fertilities(db, flat(db)[aid]) == new, 'Fruchtbarkeiten nicht übernommen'
     assert u32s(Save.template_fertilities(db, aid)) == sorted(new), 'Kartenvorlage nicht angepasst'
     print('Fruchtbarkeiten:', len(have), '->', len(new), '(samt Kartenvorlage)')
+    # items: two onto an existing stack, one new kind; ships: load a hold, empty one; all must read back
+    s = Save(path)
+    lab, db, cont = s.item_stores(names)[0]
+    have = {g: len(x[1]) for g, x in s.item_stacks(db, cont).items()}
+    old, new = next(iter(have)), next(g for g, _ in names['items'] if g not in have)
+    s.add_items(db, cont, old, 2)
+    s.add_items(db, cont, new, 1)
+    ships = s.ships(names)
+    hold = s.cargo(*ships[0][1:])
+    ware = s.goods(names)[0]
+    s.set_cargo(ships[0][1], hold[0][0], ware, 99)
+    s.set_cargo(ships[0][1], hold[1][0], None, 0)
+    s.set_cargo(ships[0][1], hold[2][0], None, 0)
+    s.add_items(ships[0][1], None, new, 1, slot=hold[2][0])
+    s.write(tmp)
+    u = Save(tmp)
+    _, db, cont = u.item_stores(names)[0]
+    got = {g: len(x[1]) for g, x in u.item_stacks(db, cont).items()}
+    assert got[old] == have[old] + 2 and got[new] == 1, 'Items nicht übernommen'
+    ism = db.path('GameSessionManager', 'ItemSessionManager')[0]
+    last = struct.unpack('<q', db.tags(ism, 'ItemMap')[0][1][-2][1])[0]
+    assert last & (1 << 58) - 1 == struct.unpack('<I', db.attr(ism, 'ItemIdCounter')[1])[0] and last >> 58, 'Item-ID'
+    hold = u.cargo(*u.ships(names)[0][1:])
+    assert [(p, n) for _, p, n in hold][:3] == [(ware, 50), (None, 0), (-new, 1)], 'Fracht nicht übernommen'
+    size = len(db.tags(ism, 'ItemMap')[0][1])
+    u.set_cargo(u.ships(names)[0][1], hold[2][0], None, 0)  # unloading an item unregisters it
+    assert len(db.tags(ism, 'ItemMap')[0][1]) == size - 2, 'Item im Laderaum nicht abgemeldet'
+    assert sum(map(bool, names['itemtips'].values())) > len(names['itemtips']) // 2, 'Item-Tooltips'
+    assert sum('★' in v for v in names['itemtips'].values()) > 30 and any(' ← ' in v for v in names['itemtips'].values()), 'Boost-Tooltips'
+    assert 50 < len(names['shipitems']) < len(names['items']) // 2, 'Schiffs-Items'
+    print(lab, 'Items +3,', len(ships), 'Schiffe, Fracht gesetzt')
+    # modules: every ship as found keeps to the rules; a buffed module out (its effect goes), one buffed and one weapon in
+    s = Save(path)
+    kind = lambda db, o: names['shipmods'].get(str(struct.unpack('<i', db.attr(o, 'guid')[1][:4])[0]))
+    ships = [(db, o) for _, db, o in s.ships(names) if kind(db, o)]
+    for db, o in ships:
+        have = [g for _, g in Save.modules(db, o)]
+        assert not have or have[-1] in Save.module_choices(kind(db, o), have[:-1]), 'Modulregeln'
+    mgr = lambda d: d.path('MetaGameManager', 'MetaEffectManager')[0]
+    ids = lambda sv: [sv.data.attr(e, 'Id')[1] for lst in sv.effects()[1][1::2] for e in lst[1]]
+    db, o = next((db, o) for db, o in ships if any(g in names['modfx'] for _, g in Save.modules(db, o)))
+    gone = next(m for m, g in Save.modules(db, o) if g in names['modfx'])
+    gone_id = db.attr(db.tags(gone, 'EffectId')[0], 'value')[1]
+    s.remove_module(db, o, gone)
+    free = Save.module_choices(kind(db, o), [g for _, g in Save.modules(db, o)])
+    add = [next(g for g in free if g in names['modfx'])]
+    s.add_module(db, o, add[0], names['modfx'])
+    free = Save.module_choices(kind(db, o), [g for _, g in Save.modules(db, o)])
+    add += [g for g in free if g not in names['modfx']][:1]
+    for g in add[1:]:
+        s.add_module(db, o, g, names['modfx'])
+    want, n0, key = [g for _, g in Save.modules(db, o)], mgr(s.data), db.attr(o, 'ID')[1]
+    n0 = struct.unpack('<q', s.data.attr(n0, 'NextEffectIndex')[1])[0]
+    s.write(tmp)
+    u = Save(tmp)
+    db2, o2 = next((db, o) for _, db, o in u.ships(names) if db.attr(o, 'ID')[1] == key)
+    assert [g for _, g in Save.modules(db2, o2)] == want, 'Module nicht übernommen'
+    new_id = db2.attr(db2.tags(Save.modules(db2, o2)[-len(add)][0], 'EffectId')[0], 'value')[1]
+    assert gone_id not in ids(u) and new_id in ids(u) and struct.unpack('<Q', new_id)[0] == 1 << 63 | n0 - 1, 'Moduleffekt'
+    assert struct.unpack('<q', u.data.attr(mgr(u.data), 'NextEffectIndex')[1])[0] == n0, 'Effektzähler'
+    src = next(e for lst in u.effects()[1][1::2] for e in lst[1] if u.data.attr(e, 'Id')[1] == new_id)
+    assert u.data.attr(u.data.tags(src, 'Source')[0], 'ObjectID')[1] == key, 'Effektquelle'
+    print('Module:', len(ships), 'Schiffe regelkonform, 1 aus- und', len(add), 'eingebaut')
     # map: every island of the first region becomes a PNG; an icon decodes with transparent and opaque pixels
     lay = map_layout(game, s.map_islands(s.sessions[0][2]))
     k = map_fit(lay, 300, 200)[0]

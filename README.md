@@ -8,6 +8,9 @@ Kleiner Desktop-Editor (Python/tkinter) für Spielstände von *Anno 117 – Pax 
 
 - Denare, Baurechte und Auxiliareserven
 - Lager jeder eigenen Insel (Latium, Albion, Aegyptus), mit Suchfeld
+- Items ins Lager einer eigenen Insel legen (alle Items des Spiels, nach Seltenheit eingefärbt, mit Suchfeld und Tooltip, was das Item bewirkt)
+- Fracht eigener Schiffe: Waren (bis 50) oder ein Item in einen Laderaum laden oder ihn leeren
+- Module eigener Schiffe ein- und ausbauen (Ruder, Mast, Rumpf, Waffen; nach den Regeln des Schifftyps). Experimentell: die neue Datei erst im Spiel testen
 - Fruchtbarkeiten und Rohstoffvorkommen: Insel auf der Regionskarte anklicken (gedreht wie im Spiel, Mausrad zoomt), dann im Fenster mit den Warensymbolen an- und abhaken. Die Karte zeigt Inselnamen und gebaute Gebäude als Punkte; die Maus auf einer Insel zeigt ihre Fruchtbarkeiten
 - Spieleinstellungen inkl. DLC-Optionen (z. B. Vulkanaktivität), mit den Texten und der Gliederung des Spielmenüs, mit Suchfeld
 - Deutsch/Englisch und Hell/Dunkel umschaltbar
@@ -45,6 +48,9 @@ Small desktop editor (Python/tkinter) for *Anno 117 – Pax Romana* save games:
 
 - Denarii, building permits (Officium, Depot, Shrine) and garrison auxilia
 - Storage of each of your islands (Latium, Albion, Aegyptus), with a search field
+- Put items into one of your islands' storage (every item of the game, coloured by rarity, with a search field and a tooltip on what the item does)
+- Cargo of your ships: load goods (up to 50) or an item into a hold, or empty it
+- Add and remove modules of your ships (rudder, mast, hull, weapons; by the rules of the ship type). Experimental: test the new file in the game first
 - Fertilities and resource deposits: click an island on the region map (turned as in the game, the wheel zooms), then tick or untick them with their icons. The map shows island names and existing buildings as dots; pointing at an island shows its fertilities
 - Game settings incl. DLC options (e.g. volcanic activity), with the game's own texts and menu layout, with a search field
 - German/English and light/dark mode
