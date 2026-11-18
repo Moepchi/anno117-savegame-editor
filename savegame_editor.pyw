@@ -12,20 +12,24 @@ CACHE = os.path.join(DATA, 'namen_{}.json')  # game names per language
 PREFS = os.path.join(DATA, 'einstellungen.json')  # game folder, save folder, dark mode, language
 LANGS = {'de': ('Deutsch', 'german'), 'en': ('English', 'english')}  # code: (menu name, texts_<x>.xml)
 LANG = 'de'  # set by the window
-VERSION = '1.4.0'  # the GitHub release tag is 'v' + VERSION
+VERSION = '1.5.0'  # the GitHub release tag is 'v' + VERSION
 TITLE = f'Anno 117 Savegame-Editor {VERSION}'
 UPDATE_API = 'https://api.github.com/repos/Moepchi/anno117-savegame-editor/releases/latest'
 EXE = 'Anno117-Savegame-Editor.exe'  # release asset name
 PLAYER = 41  # OwnerProfile / ParticipantGUID of the human player
+OBSIDIAN_LODE = 145337  # fertility "Deposit Limited Roman Obsidian"
+# ponytail: LimitedLodeMaximum of asset 145337 by island size; the research 145107 (+250 each) is not read from the save
+LODE_MAX = {'small': 350, 'medium': 500, 'large': 650, 'extralarge': 800, 'continental': 950}
 DIAG = .5 ** .5  # the game shows maps turned by 45°
 MAGIC = b'\x08\x00\x00\x00\xfd\xff\xff\xff'
 # setup tags whose UI category is spelled differently in assets.xml
 ALIAS = {'SetupTraderTraderPrices': 'TraderTradePrices',
          'SetupVolcanoSchedulerIntervalDuration': 'VolcanoSchedulerIntervalLength',
          'SetupContinetnalIslandSettlementCosts': 'ContinentalIslandSettlementCosts'}
-# pirate comboboxes -> field tag in the save (Dormancy left out on purpose: 2 = defeated has no menu entry)
+# pirate comboboxes -> field tag in the save
 PIRATE = {'PirateRaidDifficulty': 'RaidDifficulty', 'PirateWarFleetDifficulty': 'WarFleetDifficulty',
-          'PiratePatrolsDifficulty': 'PatrolDifficulty', 'PirateWarThreatsDifficulty': 'WarThreats'}
+          'PiratePatrolsDifficulty': 'PatrolDifficulty', 'PirateWarThreatsDifficulty': 'WarThreats',
+          'PirateDormancyDifficultyUI': 'Dormancy'}
 # tab titles of the game's setup menu (SettingsMenu GUID -> LineId); assets.xml lists the menus but not their titles
 SECTIONS = {'150498': '-6914829576719174900', '50976': '-6913167428570173649', '51051': '-6909293900839592885',
             '51052': '-6909425974996756542', '51053': '-6909049289369605519'}
@@ -51,6 +55,22 @@ EN = {
     'Doppelklick ändert eine Menge. Mehrere Zeilen mit Strg/Umschalt markieren und':
         'Double-click changes an amount. Select several rows with Ctrl/Shift and',
     'Auswahl setzen …': 'Set selection …',
+    'Obsidian-Vorkommen: {} (Maximum nach Inselgröße {})': 'Obsidian deposit: {} (maximum for the island size {})',
+    'Kein Obsidian-Vorkommen': 'No obsidian deposit',
+    'Vorkommen ändern …': 'Change deposit …',
+    'Alle Vorkommen auffüllen …': 'Refill all deposits …',
+    'Neue Menge im Obsidian-Vorkommen:': 'New amount in the obsidian deposit:',
+    'Alle Obsidian-Vorkommen auf das Maximum ihrer Inselgröße (350 bis 950) auffüllen, plus (250 nach der Forschung):':
+        'Refill all obsidian deposits to the maximum for their island size (350 to 950), plus (250 after the research):',
+    '{} Obsidian-Vorkommen aufgefüllt': '{} obsidian deposits refilled',
+    'Offene Quests im Questlog. Beenden erfüllt ihre Ziele; das Spiel schließt sie nach dem Laden selbst ab '
+    '(experimentell: neue Datei erst im Spiel testen).': 'Open quests in the quest log. Ending one meets its objectives; '
+    'the game completes it itself after loading (experimental: test the new file in the game first).',
+    'Auswahl beenden': 'End selection',
+    'Doppelklick zeigt die Ziele der Quest.': "Double-click shows the quest's objectives.",
+    'Kein Questtext im Spielstand': 'No quest text in the save',
+    '{} Quests beendet (wirkt nach dem Speichern und Laden im Spiel)': '{} quests ended (takes effect after saving and '
+    'loading in the game)',
     'Spieleinstellungen': 'Game settings',
     'Doppelklick zum Ändern. Gruppen und Reihenfolge wie im Spielmenü. Grau = Startoptionen und Kartenerzeugung: '
     'Sie wirken nur beim Spielbeginn und sind darum gesperrt.':
@@ -84,6 +104,9 @@ EN = {
     'Update fehlgeschlagen: {}': 'Update failed: {}',
     'Prüfsumme des Downloads stimmt nicht.': "The download's checksum does not match.",
     'Spielstand öffnen': 'Open save game',
+    'Noch nicht erschienen': 'Not appeared yet',
+    'Experimentell: Gegner nach Spielstart umgeschaltet, erst an einer Kopie testen.':
+        'Experimental: opponent switched after game start, test on a copy first.',
     'Anno 117 Spielstand': 'Anno 117 save game',
     'Lade Spielstand …': 'Loading save game …',
     'Geladen: {}': 'Loaded: {}',
@@ -258,6 +281,22 @@ class FileDB:
     def attr(self, node, name):
         return next((k for k in node[1] if type(k[1]) is bytes and self.name(k) == name), None)
 
+    def attr_id(self, name):
+        """Id of an attribute name, appended to the attribute dictionary if the file lacks it.
+        Dictionary: [u32 n][n u16 ids][n names \\0], zero-padded to 8 plus 4 (as the game writes it)."""
+        if (name, True) not in self.ids:
+            d = self.dicts[self.aoff:]
+            n = struct.unpack_from('<I', d)[0]
+            ids = struct.unpack_from(f'<{n}H', d, 4)
+            p = 4 + 2 * n
+            for _ in range(n):
+                p = d.index(b'\0', p) + 1
+            i = max(ids) + 1
+            body = struct.pack(f'<I{n + 1}H', n + 1, *ids, i) + d[4 + 2 * n:p] + name.encode() + b'\0'
+            self.dicts = self.dicts[:self.aoff] + body + bytes(-len(body) % 8 + 4)
+            self.names[i], self.ids[name, True] = name, i
+        return self.ids[name, True]
+
 
 # ---------- storages: [guid0][n-1 gaps (minus 1)][n amounts], u32/i32 in StrgLrg, u8 in StrgSmll ----------
 
@@ -331,6 +370,99 @@ class Save:
         for db, a in self.refs[key]:
             a[1] = struct.pack('<H', value)
             self.changed.add(db)
+        if key.endswith(':Dormancy') and value in (1, 2):
+            self.switch_pirate(int(key.split(':')[1]), value == 2)
+
+    def pirates(self, profile):
+        """[(db, Pirate tag)] of one pirate's objects in the sessions."""
+        out = []
+        for _, _, db in self.sessions:
+            for m in (m for am in db.path('GameSessionManager', 'AreaManagers') for m in am[1] if type(m[1]) is list):
+                for o in (o for a in db.tags(m, 'AreaObjectManager') for g in db.tags(a, 'GameObject')
+                          for y in db.tags(g, 'objects') for o in db.tags(y, 'None')):
+                    guid = db.attr(o, 'guid')
+                    if guid and struct.unpack('<i', guid[1][:4])[0] == profile:
+                        out += [(db, p) for p in db.tags(o, 'Pirate')]
+        return out
+
+    def switch_pirate(self, profile, off):
+        """Experimental: the game sets Disabled in the session's Pirate object when a pirate is off; switching
+        after the game start is not offered in-game. Switching off also sinks its warships and land troops."""
+        for db, p in self.pirates(profile):
+            a = db.attr(p, 'Disabled')
+            if off:
+                self.drop_fleet(db, p, profile)
+            if off and not a:
+                at = next((i + 1 for i, k in enumerate(p[1]) if db.name(k) == 'ChaseRange'), 0)
+                p[1].insert(at, [db.attr_id('Disabled'), b'\x01'])
+            elif not off and a:
+                p[1].remove(a)
+            self.changed.add(db)
+        if off:  # her contract offers ("Aufträge verfügbar" at the ruined base): [provider guid, data] pairs
+            # ponytail: kept while the player runs one of her contracts; switching back on leaves the game to offer anew
+            key = struct.pack('<i', profile)
+            for cp in self.data.path('MetaGameManager', 'ContractManager', 'ContractHandler', 'Data', 'None', 'ContractProviderData', 'Data'):
+                pairs = [cp[1][i:i + 2] for i in range(0, len(cp[1]), 2)]
+                cp[1][:] = [n for k, v in pairs if not (k[1] == key and not any(
+                    x[1] for x in self.data.tags(v, 'ActiveContracts'))) for n in (k, v)]
+            self.changed.add(self.data)
+
+    @staticmethod
+    def drop_fleet(db, pirate, profile):
+        """Removes a pirate's units (Warships/LandTroops and any other unit she owns, e.g. trade ships idling at
+        her ruined base, which keep her symbol on the minimap) from every place the session keeps units: the
+        objects, the unit system, group behaviors used only by them, their AI squads (with the unit -> squad map)
+        and other units' shock memories. ponytail: a message in data.a7s may still name a removed ship; sunk
+        ships leave those too."""
+        ids = set()
+        for n in ('Warships', 'LandTroops'):
+            a = db.attr(pirate, n)
+            if a:
+                ids |= {a[1][i:i + 8] for i in range(0, len(a[1]), 8)}
+                a[1] = b''
+        everything = [y for am in db.path('GameSessionManager', 'AreaManagers') for m in am[1] if type(m[1]) is list
+                      for a in db.tags(m, 'AreaObjectManager') for g in db.tags(a, 'GameObject') for y in db.tags(g, 'objects')]
+        own = struct.pack('<i', profile)
+        ids |= {db.attr(o, 'ID')[1] for y in everything for o in y[1] if type(o[1]) is list and db.tags(o, 'Unit')
+                and not db.tags(o, 'Building') and (db.attr(o, 'OwnerProfile') or [0, b''])[1][:4] == own}
+        if not ids:
+            return
+        hit = lambda n: any(map(hit, n[1])) if type(n[1]) is list else n[1] in ids
+        keep = lambda n: not (type(n[1]) is list and (db.attr(n, 'ID') or [0, b''])[1] in ids)
+        for objs in everything:
+            objs[1][:] = filter(keep, objs[1])
+        us = 'GameSessionManager', 'SessionUnitManager', 'UnitSystem'
+        for units in db.path(*us, 'Units'):
+            units[1][:] = filter(keep, units[1])
+            for shock in (s for u in units[1] if type(u[1]) is list for x in db.tags(u, 'Actor') for m in db.tags(x, 'MoraleState')
+                          for s in db.tags(m, 'RecentReceivedShockEvents')):
+                shock[1][:] = [e for e in shock[1] if not (type(e[1]) is list and e[1] and type(e[1][0][1]) is bytes
+                                                           and e[1][0][1] in ids)]
+        for beh in db.path(*us, 'GroupBehaviorHandler', 'Behaviors'):
+            for b in [b for b in beh[1] if type(b[1]) is list and hit(b)]:
+                lists = db.tags(b, 'ActiveMemberIDs') + db.tags(b, 'PendingMemberIDs')
+                for x in lists:
+                    x[1][:] = [i for i in x[1] if i[1] not in ids]
+                if not any(x[1] for x in lists):
+                    beh[1].remove(b)
+        # [squad id, squad] pairs; a squad goes when its own units are hers (other squads may only list her ships
+        # as enemies). ponytail: such enemy lists (NearbyEnemyShips) are left as they are, the AI refreshes them
+        own = lambda v: any(hit(s) for q in db.tags(v, 'Squad') for x in db.tags(q, 'value') for s in db.tags(x, 'SquadUnits'))
+        for sq in db.path('GameSessionManager', 'AIUnitManager', 'SquadsByID'):
+            pairs = [sq[1][i:i + 2] for i in range(0, len(sq[1]), 2)]
+            sq[1][:] = [n for k, v in pairs if not own(v) for n in (k, v)]
+        for u2s in db.path('GameSessionManager', 'AIUnitManager', 'UnitsToSquadIDs'):  # [unit id, squad id] pairs
+            pairs = [u2s[1][i:i + 2] for i in range(0, len(u2s[1]), 2)]
+            u2s[1][:] = [n for u, s in pairs if u[1] not in ids for n in (u, s)]
+        # a fight in progress: [unit id, data] / [object id, battle id] pairs, her shots in the air, battle members.
+        # ponytail: other units' TargetObjectID / LastAttackerID stay, as after any sunk ship
+        for pairs in db.path(*us, 'AttackLocationHandler', 'UnitData') + db.path('GameSessionManager', 'SessionUnitManager',
+                                                                                 'BattleTracker', 'ObjectToBattleId'):
+            pairs[1][:] = [n for i in range(0, len(pairs[1]), 2) if pairs[1][i][1] not in ids for n in pairs[1][i:i + 2]]
+        for lst in db.path(*us, 'ProjectileHandler', 'ProjectileInfos') + [
+                x for b in db.path('GameSessionManager', 'SessionUnitManager', 'BattleTracker', 'BattleIdToBattle', 'None')
+                if type(b[1]) is list for x in db.tags(b, 'InvolvedObjects')]:
+            lst[1][:] = [e for e in lst[1] if not (type(e[1]) is list and hit(e))]
 
     def islands(self, names):
         """[(label, db, AreaInfo entry)] for every player island."""
@@ -420,6 +552,90 @@ class Save:
         arr = self.template_fertilities(db, aid)
         if arr:
             arr[1] = struct.pack(f'<{len(guids)}I', *guids)
+        self.changed.add(db)
+
+    def lodes(self, names):
+        """{island label (as in islands()): [db, amount attribute, maximum]}: the island's obsidian lode, the game's only
+        limited fertility (AreaInfo/LimitedLodeComponent: [fertility guid, i32 amount] pairs)."""
+        out = {}
+        for guid, _, db in self.sessions:
+            paths = {i: p for i, *_, p in self.map_islands(db)}
+            for el, v in self.areas(db).items():
+                for _, area in v:
+                    pairs = [x for c in db.tags(area, 'LimitedLodeComponent') for f in db.tags(c, 'LimitedLodeFertilities') for x in f[1]]
+                    amount = next((b for a, b in zip(pairs[0::2], pairs[1::2]) if a[1] == struct.pack('<I', OBSIDIAN_LODE)), None)
+                    if amount and self.is_player(db, area):
+                        size = re.search(r'_(small|medium|large|extralarge|continental)_', paths.get(el, ''))
+                        out[f'{self.area_name(db, area, names)} ({names["assets"].get(str(guid), guid)})'] = \
+                            [db, amount, LODE_MAX[size.group(1)] if size else 0]
+        return out
+
+    def set_lode(self, db, amount, v):
+        amount[1] = struct.pack('<i', v)
+        self.changed.add(db)
+
+    def quests(self, names):
+        """[[name, conditions]] of the open quest log entries (not IsArchived, with LinkedObjectives). An objective is a
+        condition tree (MetaGameManager/ConditionManager) whose nodes share QuestData/QuestID {StorylineID, ComponentGUID};
+        finished objectives' conditions are gone from the save."""
+        db = self.data
+        u32 = lambda n, a: struct.unpack('<I', db.attr(n, a)[1])[0] if db.attr(n, a) else 0
+        trees = {}
+        for c in [c for x in db.path('MetaGameManager', 'ConditionManager', 'Conditions') for c in x[1] if type(c[1]) is list]:
+            for i in [i for d in db.tags(c, 'QuestData') for i in db.tags(d, 'QuestID') if db.attr(i, 'ComponentGUID')]:
+                trees.setdefault((u32(i, 'StorylineID'), u32(i, 'ComponentGUID')), []).append(c)
+        out = []
+        for e in [e for x in db.path('MetaGameManager', 'QuestManager', 'QuestEntryHandler', 'QuestEntries', 'Data', 'None')
+                  for e in x[1] if type(e[1]) is list and not db.attr(e, 'IsArchived')]:
+            ids = [n for lo in db.tags(e, 'LinkedObjectives') for x in lo[1] if type(x[1]) is list
+                   for n in [x] + db.tags(x, 'ID') if db.attr(n, 'ComponentGUID')]
+            conds = [c for n in ids for c in trees.get((u32(n, 'StorylineID'), u32(n, 'ComponentGUID')), [])]
+            guid = sum(u32(i, 'GUID') for i in db.tags(e, 'ID'))
+            if conds:
+                out.append([names['quests'].get(str(guid), f'Quest {guid}'), conds])
+        return out
+
+    def quest_text(self, conds, names):
+        """The quest's objective texts as the game's quest log shows them, placeholders filled from the conditions:
+        amount and asset of a counter, goods and amounts of a delivery, the research. Progress and the delivery
+        target (an object on the map) are not in reach: '?' and '…'."""
+        db, texts, assets = self.data, names['texts'], names['assets']
+        num = lambda c, a, f: db.attr(c, a) and struct.unpack(f, db.attr(c, a)[1][:struct.calcsize(f)])[0]
+        val = {}
+        for c in conds:
+            val.setdefault('Amount', num(c, 'CounterAmount', '<q'))
+            val.setdefault('Context', num(c, 'Context', '<I'))
+            val.setdefault('Tech', num(c, 'TechGuid', '<I'))
+            for g in [g for d in db.tags(c, 'DemandedGoods') for g in d[1] if type(g[1]) is list]:
+                val.setdefault('Good', num(g, 'ProductGuid', '<I'))
+                val.setdefault('GoodAmount', num(g, 'ProductAmount', '<i'))
+            val = {k: v for k, v in val.items() if v}
+        name = lambda g: assets.get(str(g), '…') if g else '…'
+        rules = [(r'CurrentAmount|Progress', lambda: '?'), (r'\.Amount\b', lambda: val.get('Amount', '?')),
+                 (r'GetAmount', lambda: val.get('GoodAmount', '?')), (r'GetDeliveryObject', lambda: name(val.get('Good'))),
+                 (r'\.Context\)', lambda: name(val.get('Context'))), (r'TechGUID', lambda: names['techs'].get(str(val.get('Tech')), '…'))]
+        fill = lambda m: str(next((f() for r, f in rules if re.search(r, m.group(0))), '…'))
+        out = []
+        for c in conds:
+            for d in db.tags(c, 'QuestData'):
+                for a in ('ConditionHeadlineTextID', 'ConditionTextID'):
+                    v = db.attr(d, a)
+                    line = v and re.sub(r'\{[^}]*\}', fill, texts.get(str(struct.unpack('<q', v[1])[0]), ''))
+                    if line and line not in out:
+                        out.append(line)
+        return '\n\n'.join(out)
+
+    def end_quest(self, conds):
+        """Resolves every condition of the quest's objectives but each tree's root, as the game leaves a met condition
+        (IsResolved=01, no IsActive): the still active root sees its met subcondition and the game moves the storyline on.
+        ponytail: guessed from finished subconditions in saves, not from the game code; fail branches would count as met"""
+        db = self.data
+        subs = {x[1] for c in conds for k in db.tags(c, 'SubConditionKeys') for x in k[1]}
+        for c in conds:
+            if db.attr(c, 'conditionKey')[1] in subs and not db.attr(c, 'IsResolved'):
+                c[1][:] = [x for x in c[1] if db.name(x) != 'IsActive']
+                at = next(i for i, x in enumerate(c[1]) if db.name(x) == 'Result') + 1
+                c[1].insert(at, [db.attr_id('IsResolved'), b'\x01'])
         self.changed.add(db)
 
     def empire(self):
@@ -650,11 +866,12 @@ def is_game_dir(path):
 
 def game_names(game, lang='de'):
     src = os.path.join(game, 'maindata', 'config.rda')
-    stamp, cache_file = os.path.getmtime(src), CACHE.format(lang)
+    # the editor version is part of the stamp: a newer editor may read more from the game files than an old cache holds
+    stamp, cache_file = [os.path.getmtime(src), VERSION], CACHE.format(lang)
     try:
         with open(cache_file, encoding='utf-8') as f:
             cache = json.load(f)
-        if cache['stamp'] == stamp and 'modfx' in cache:
+        if cache['stamp'] == stamp and 'techs' in cache:  # 1.5.0 test builds cached names without quests and techs
             return cache
     except (OSError, ValueError, KeyError):
         pass
@@ -669,8 +886,9 @@ def game_names(game, lang='de'):
                     break
     clean = lambda t: re.sub(r'<[^>]*>', '', html.unescape(t)).strip()
     texts = {k: clean(v) for k, v in re.findall(r'<LineId>(-?\d+)</LineId>\s*<Text>(.*?)</Text>', raw['texts'], re.S)}
-    assets, descs, menus, slots, icons, items = {}, {}, {}, {}, {}, []
+    assets, descs, menus, slots, icons, items, products, quests, techs = {}, {}, {}, {}, {}, [], [], {}, {}
     item_chunks, parts, shipitems = {}, {}, []  # items; their buffs and target pools; items for ships (captains)
+    bases = {}  # asset → its BaseAssetGUID (Celtic and Egyptian ships and modules are variants of the Roman ones)
     shipmods, modfx = {}, []  # ship type → [most modules, [[type, module, most of it]], hull places]; modules with a buff
     for chunk in raw['assets'].split('<Asset>'):
         if '<Template>Fertility</Template>' in chunk and '<LimitedLodeMaximum>' not in chunk:  # limited lodes have an amount
@@ -685,26 +903,47 @@ def game_names(game, lang='de'):
         d = '<Template>Product</Template>' in chunk and re.search(r'<InfoDescription>(-?\d+)<', chunk)
         if g and d and texts.get(d.group(1)):
             descs[g.group(1)] = texts[d.group(1)]  # tooltip text for goods
+        if g and '<Template>Product</Template>' in chunk and '<BasePrice>' in chunk:
+            products.append(int(g.group(1)))  # real goods; workforce, Denare, reserves and building rights have no price
         tpl = re.search(r'<Template>(\w+)</Template>', chunk)
         tpl = tpl and tpl.group(1)
+        q = tpl == 'QuestEntry' and re.search(r'<QuestName>(-?\d+)<', chunk)
+        if q and texts.get(q.group(1)):
+            quests[g.group(1)] = texts[q.group(1)]  # the quest log's names
+        q = tpl == 'Tech' and re.search(r'<TechName>(-?\d+)<', chunk)
+        if q and texts.get(q.group(1)):
+            techs[g.group(1)] = texts[q.group(1)]  # research names for quest texts
         if g and g.group(1) in assets and tpl in ('Item', 'ItemWithBoost', 'ItemWithUI'):
             r = re.search(r'<Rarity>(\w+)<', chunk)
             items.append([int(g.group(1)), r.group(1) if r else 'Common'])
             item_chunks[g.group(1)] = chunk
             if '<Allocation>Ship</Allocation>' in chunk:
                 shipitems.append(int(g.group(1)))
+        b = g and re.search(r'<BaseAssetGUID>(\d+)</BaseAssetGUID>', chunk)
+        if b:
+            bases[g.group(1)] = b.group(1)
         conf = g and re.search(r'<ShipModulesConfig>(.*?)</ShipModulesConfig>', chunk, re.S)
-        if conf:
+        if conf:  # [most, [[type, module, most of it]], places]; None / [] = as the base asset (filled in below)
             most = re.search(r'<MaximumModificationCount>(\d+)<', chunk)
-            shipmods[g.group(1)] = [int(most.group(1)) if most else 99, [[k, int(m), int(n or 1)] for k, m, n in re.findall(
-                r'<(\w+)>\s*<ModuleAsset>(\d+)</ModuleAsset>\s*(?:<MaximumModuleCount>(\d+)</MaximumModuleCount>)?', conf.group(1))
-                if m in assets], [p.split(';') for p in re.findall(r'<SupportsModuleSlots>([^<]*)<', chunk)]]
+            shipmods[g.group(1)] = [most and int(most.group(1)), [[k, int(m), n and int(n)] for k, m, n in re.findall(
+                r'<(\w+)>\s*<ModuleAsset>(\d+)</ModuleAsset>\s*(?:<MaximumModuleCount>(\d+)</MaximumModuleCount>)?', conf.group(1))],
+                [p.split(';') for p in re.findall(r'<SupportsModuleSlots>([^<]*)<', chunk)]]
         if g and tpl == 'ShipModule' and '<Buffs>' in chunk:
             modfx.append(int(g.group(1)))
         if g and tpl and (tpl.endswith('Buff') or tpl in ('AssetPool', 'Effect')):
             parts[g.group(1)] = chunk
         if g and '<Template>SettingsMenu</Template>' in chunk:
             menus[g.group(1)] = chunk
+
+    for _ in range(3):  # ponytail: variants of variants up to three deep
+        for g, b in bases.items():
+            if g not in assets and b in assets:
+                assets[g] = assets[b]
+    for g, (most, mods, places) in shipmods.items():  # a variant ship keeps its base's hull places and limits
+        base = shipmods.get(bases.get(g), [None, [], []])
+        n_of = {k: n for k, _, n in base[1]}
+        shipmods[g] = [most or base[0] or 99, [[k, m, n or n_of.get(k) or 1] for k, m, n in mods if str(m) in assets],
+                       places or base[2]]
 
     def key_of(body):
         m = re.search(r'Textsource>GameSetup\.RelevantGameSetup[.:](\w+)(?:\((?:datasets\.DifficultyCategory\.)?(\w+)\))?<', body)
@@ -734,6 +973,10 @@ def game_names(game, lang='de'):
             options = re.findall(r'<Text>(-?\d+)</Text>', body)
         if key and head and options:
             settings[key] = [texts.get(head.group(1), key), [texts.get(o, o) for o in options]]
+            if key.endswith(':Dormancy'):  # menu order is Inaktiv, Aktiv; the save stores 1 = on, 2 = off
+                # ponytail: 0 seen only before the pirate first shows up; meaning guessed from saves, not from game data
+                off, on = settings[key][1]
+                settings[key][1] = [t('Noch nicht erschienen'), on, off]
     # fertilities in the order of the game's map legend, with the slot they need (Mountain/River/Marsh or '')
     legend = re.findall(r'<GUID>(\d+)</GUID>', re.search(r'<FertilityOrder>.*?</FertilityOrder>', raw['assets'], re.S).group(0))
     ferts = [[int(g), slots[g]] for g in legend if g in slots]
@@ -744,7 +987,8 @@ def game_names(game, lang='de'):
     itemtips = {g: item_tip(c, parts, assets, texts, keys) for g, c in item_chunks.items()}
     cache = {'stamp': stamp, 'texts': texts, 'assets': assets, 'descs': descs, 'settings': settings, 'menu': menu,
              'ferts': ferts, 'icons': icons, 'items': items, 'itemtips': itemtips, 'shipitems': shipitems,
-             'shipmods': shipmods, 'modfx': modfx}
+             'shipmods': shipmods, 'modfx': modfx, 'products': products,
+             'quests': quests, 'techs': techs}
     os.makedirs(DATA, exist_ok=True)
     with open(cache_file, 'w', encoding='utf-8') as f:
         json.dump(cache, f, ensure_ascii=False)
@@ -1264,7 +1508,8 @@ def run_ui():
     root.geometry('860x660')
     root.report_callback_exception = lambda typ, err, tb: messagebox.showerror(TITLE, f'{typ.__name__}: {err}')
     status = tk.StringVar(value=t('Lade Namen aus den Spieldateien …'))
-    s = {'save': None, 'storages': [], 'regions': [], 'maps': {}, 'dots': {}, 'items': [], 'ships': []}
+    s = {'save': None, 'storages': [], 'regions': [], 'maps': {}, 'dots': {}, 'items': [], 'ships': [], 'lodes': {},
+         'quests': []}
     names = {'descs': {}}  # game names; loaded once the game folder is known (the tooltip may fire before)
     texts = []  # (widget, German text), re-translated when the language changes
 
@@ -1311,6 +1556,13 @@ def run_ui():
     row.pack(fill='x')
     tr(ttk.Label(row), 'Doppelklick ändert eine Menge. Mehrere Zeilen mit Strg/Umschalt markieren und').pack(side='left')
     tr(ttk.Button(row, command=lambda: edit_goods(goods.selection())), 'Auswahl setzen …').pack(side='left', padx=6)
+    row1 = ttk.Frame(tab1)
+    row1.pack(fill='x', pady=(4, 0))
+    lode_text = tk.StringVar()
+    ttk.Label(row1, textvariable=lode_text).pack(side='left')
+    lode_btn = tr(ttk.Button(row1, command=lambda: edit_lode()), 'Vorkommen ändern …')
+    lode_btn.pack(side='left', padx=6)
+    tr(ttk.Button(row1, command=lambda: fill_lodes()), 'Alle Vorkommen auffüllen …').pack(side='left')
 
     tab2 = ttk.Frame(nb, padding=6)
     nb.add(tab2, text=t('Spieleinstellungen'))
@@ -1373,6 +1625,14 @@ def run_ui():
     tr(ttk.Button(bar5, command=lambda: add_module()), 'Modul einbauen …').pack(side='left')
     tr(ttk.Button(bar5, command=lambda: remove_module()), 'Modul ausbauen').pack(side='left', padx=6)
 
+    tab6 = ttk.Frame(nb, padding=6)
+    nb.add(tab6, text=t('Quests'))
+    tr(ttk.Label(tab6, wraplength=820), 'Offene Quests im Questlog. Beenden erfüllt ihre Ziele; das Spiel schließt sie '
+       'nach dem Laden selbst ab (experimentell: neue Datei erst im Spiel testen).').pack(anchor='w')
+    questtv = table(tab6, ('Quest',), (700,))
+    tr(ttk.Label(tab6), 'Doppelklick zeigt die Ziele der Quest.').pack(anchor='w')
+    tr(ttk.Button(tab6, command=lambda: end_quests()), 'Auswahl beenden').pack(anchor='w')
+
     # sorting: click a heading → ascending, again → descending, a third time → original order
     order = {}  # table → (column, descending)
 
@@ -1414,9 +1674,10 @@ def run_ui():
         if tv in order:
             resort(tv)
         elif s['save']:
-            {goods: show_storage, sets: show_settings, itemtv: show_items, cargo: show_cargo, modtv: show_modules}[tv]()
+            {goods: show_storage, sets: show_settings, itemtv: show_items, cargo: show_cargo, modtv: show_modules,
+             questtv: show_quests}[tv]()
 
-    for tv in (goods, sets, itemtv, cargo, modtv):
+    for tv in (goods, sets, itemtv, cargo, modtv, questtv):
         heads(tv)
 
     def dirty():
@@ -1425,11 +1686,66 @@ def run_ui():
     def show_storage(*_):
         _, db, tag = s['storages'][pick.current()]
         goods.delete(*goods.get_children())
-        for guid, amount in s['save'].storage(db, tag).items():
+        have = s['save'].storage(db, tag)
+        if pick.current() >= len(s['save'].empire()):  # an island: every good of the game, at 0 (settable)
+            have = {**dict.fromkeys(names['products'], 0), **have}
+        for guid, amount in have.items():
             name = names['assets'].get(str(guid), f'GUID {guid}')
             if goods_match(name, guid):
                 goods.insert('', 'end', iid=str(guid), values=(name, f'{amount:,}'.replace(',', '.' if LANG == 'de' else ','), guid))
         resort(goods)
+        lode = s['lodes'].get(s['storages'][pick.current()][0])
+        lode_text.set(t('Obsidian-Vorkommen: {} (Maximum nach Inselgröße {})').format(
+            struct.unpack('<i', lode[1][1])[0], lode[2]) if lode else t('Kein Obsidian-Vorkommen'))
+        lode_btn.state(['!disabled' if lode else 'disabled'])
+
+    def edit_lode():
+        db, amount, most = s['lodes'][s['storages'][pick.current()][0]]
+        v = simpledialog.askinteger(TITLE, t('Neue Menge im Obsidian-Vorkommen:'), initialvalue=most,
+                                    minvalue=0, maxvalue=2 ** 31 - 1, parent=root)
+        if v is not None:
+            s['save'].set_lode(db, amount, v)
+            dirty()
+            show_storage()
+
+    def fill_lodes():
+        if not s['save'] or not s['lodes']:
+            return
+        extra = simpledialog.askinteger(TITLE, t('Alle Obsidian-Vorkommen auf das Maximum ihrer Inselgröße (350 bis 950) '
+                                                 'auffüllen, plus (250 nach der Forschung):'),
+                                        initialvalue=0, minvalue=0, maxvalue=2 ** 30, parent=root)
+        if extra is None:
+            return
+        for db, amount, most in s['lodes'].values():
+            s['save'].set_lode(db, amount, most + extra)
+        dirty()
+        show_storage()
+        status.set(t('{} Obsidian-Vorkommen aufgefüllt').format(len(s['lodes'])))
+
+    def show_quests():
+        questtv.delete(*questtv.get_children())
+        for i, (name, _) in enumerate(s['quests']):
+            questtv.insert('', 'end', iid=str(i), values=(name,))
+
+    def quest_info(row):
+        name, conds = s['quests'][int(row)]
+        win = tk.Toplevel(root)
+        win.title(name)
+        win.transient(root)
+        ttk.Label(win, text=name, font=bold).pack(anchor='w', padx=12, pady=(12, 0))
+        ttk.Label(win, text=s['save'].quest_text(conds, names) or t('Kein Questtext im Spielstand'), wraplength=560,
+                  justify='left').pack(anchor='w', padx=12, pady=12)
+        ttk.Button(win, text=t('Schließen'), command=win.destroy).pack(pady=(0, 12))
+
+    def end_quests():
+        rows = questtv.selection()
+        for i in rows:
+            s['save'].end_quest(s['quests'][int(i)][1])
+        if rows:
+            dirty()
+            status.set(t('{} Quests beendet (wirkt nach dem Speichern und Laden im Spiel)').format(len(rows)))
+            for i in rows:
+                questtv.item(i, values=('✓ ' + questtv.set(i, 'Quest'),))
 
     def edit_goods(rows):
         if not rows:
@@ -1437,7 +1753,7 @@ def run_ui():
         _, db, tag = s['storages'][pick.current()]
         items = s['save'].storage(db, tag)
         what = goods.set(rows[0], 'Ware') if len(rows) == 1 else t('{} markierte Waren').format(len(rows))
-        v = simpledialog.askinteger(TITLE, t('Neue Menge für {}:').format(what), initialvalue=items[int(rows[0])],
+        v = simpledialog.askinteger(TITLE, t('Neue Menge für {}:').format(what), initialvalue=items.get(int(rows[0]), 0),
                                     minvalue=0, maxvalue=2 ** 31 - 1, parent=root)
         if v is None:
             return
@@ -1877,6 +2193,8 @@ def run_ui():
         if nv is not None and nv != v:
             s['save'].set_setting(key, nv)
             dirty()
+            if key.endswith(':Dormancy'):
+                status.set(t('Experimentell: Gegner nach Spielstart umgeschaltet, erst an einer Kopie testen.'))
             sets.item(key, values=(value_text(key),))
             resort(sets, sets.parent(key))
 
@@ -1893,7 +2211,7 @@ def run_ui():
         root.update()
         save = Save(path)
         view['zoom'] = 1
-        s.update(save=save, storages=save.storages(names), maps={}, dots={}, items=save.item_stores(names), ships=save.ships(names),
+        s.update(save=save, storages=save.storages(names), lodes=save.lodes(names), quests=save.quests(names), maps={}, dots={}, items=save.item_stores(names), ships=save.ships(names),
                  regions=[(g, db) for g, _, db in save.sessions if db.path('GameSessionManager', 'MapTemplate')])
         pick['values'] = [x[0] for x in s['storages']]
         pick.current(0)
@@ -1906,6 +2224,7 @@ def run_ui():
         show_items()
         show_cargo()
         show_modules()
+        show_quests()
         save_btn['state'] = 'normal'
         root.title(TITLE)
         status.set(t('Geladen: {}').format(path))
@@ -1964,6 +2283,7 @@ def run_ui():
     for tv in (goods, itemtv):
         tv.bind('<Motion>', hover)
         tv.bind('<Leave>', lambda e: tip.place_forget())
+    questtv.bind('<Double-1>', lambda e: (r := questtv.identify_row(e.y)) and quest_info(r))
     sets.bind('<Double-1>', lambda e: (r := sets.identify_row(e.y)) and r in s['save'].refs and edit_setting(r))  # not on group rows
 
     dark = tk.BooleanVar(value=prefs.get('dark', windows_dark()))
@@ -2015,7 +2335,8 @@ def run_ui():
         nb.tab(tab3, text=t('Fruchtbarkeiten'))
         nb.tab(tab4, text=t('Items'))
         nb.tab(tab5, text=t('Schiffe'))
-        for tv in (goods, sets, itemtv, cargo, modtv):
+        nb.tab(tab6, text=t('Quests'))
+        for tv in (goods, sets, itemtv, cargo, modtv, questtv):
             heads(tv)
         status.set(t('Lade Namen aus den Spieldateien …'))
         root.update()
@@ -2024,7 +2345,7 @@ def run_ui():
             status.set(t('Spielstand öffnen, um zu beginnen.'))
             return
         i = pick.current()
-        s['storages'] = s['save'].storages(names)
+        s['storages'], s['lodes'], s['quests'] = s['save'].storages(names), s['save'].lodes(names), s['save'].quests(names)
         pick['values'] = [x[0] for x in s['storages']]
         pick.current(i)
         region['values'] = [names['assets'].get(str(g), g) for g, _ in s['regions']]
@@ -2037,6 +2358,7 @@ def run_ui():
         show_items()
         show_cargo()
         show_modules()
+        show_quests()
         status.set(t('Geladen: {}').format(s['save'].path))
         draw_map()
 
@@ -2199,6 +2521,39 @@ def selftest(path):
     meta = FileDB(dict(t.files)['meta.a7s'])
     assert meta.attr(meta.root, 'CorporationSaveGameName')[1].decode('utf-16-le') == 'anno117_editor_selftest'
     assert t.storage(*t.storages(names)[0][1:]).get(1010017) == money
+    # every real good of the game is offered (Obsidian), no workforce or Denare; one no island has yet can be put in
+    assert 145102 in names['products'] and 1010017 not in names['products'] and all(str(g) in names['assets'] for g in names['products'])
+    isl = min(range(len(t.empire()), len(stores)), key=lambda i: len(t.storage(*stores[i][1:])))
+    lab, db, tag = t.storages(names)[isl]
+    items = t.storage(db, tag)
+    known = t.goods(names)
+    new = min((g for g in names['products'] if g not in items), key=lambda g: g in known)
+    t.set_storage(db, tag, {**items, new: 7})
+    t.write(tmp)
+    assert Save(tmp).storage(*Save(tmp).storages(names)[isl][1:]) == {**items, new: 7}, 'Neue Ware nicht übernommen'
+    print(lab, 'neue Ware', names['assets'].get(str(new)), 'eingelagert')
+    # obsidian lodes: every island size known; refill each (to distinct values) and read back
+    lodes = t.lodes(names)
+    assert all(m for _, _, m in lodes.values()), 'Inselgröße unbekannt'
+    for i, (db, a, m) in enumerate(lodes.values()):
+        t.set_lode(db, a, m + i)
+    t.write(tmp)
+    back = {k: struct.unpack('<i', a[1])[0] for k, (_, a, _) in Save(tmp).lodes(names).items()}
+    assert back == {k: m + i for i, (k, (_, _, m)) in enumerate(lodes.items())}, 'Obsidian-Vorkommen nicht übernommen'
+    print(len(lodes), 'Obsidian-Vorkommen aufgefüllt')
+    # quests: end the first open one; below its root every condition reads back met, the root stays active
+    quests = t.quests(names)
+    if quests:
+        assert all(not n.startswith('Quest ') for n, _ in quests), 'Questname fehlt'
+        assert all('{' not in t.quest_text(c, names) for _, c in quests), 'Platzhalter im Questtext'
+        assert sum(bool(t.quest_text(c, names)) for _, c in quests) > len(quests) // 2, 'Questtexte fehlen'
+        t.end_quest(quests[0][1])
+        t.write(tmp)
+        back = Save(tmp)
+        conds = dict(back.quests(names))[quests[0][0]]
+        state = [(bool(back.data.attr(c, 'IsResolved')), bool(back.data.attr(c, 'IsActive'))) for c in conds]
+        assert state.count((False, True)) == 1 and state.count((True, False)) == len(state) - 1, state
+    print(len(quests), 'offene Quests, eine beendet')
     # fertilities: each area's set must equal its map template array (checks the AreaID → element formula);
     # then drop the first of one area and add one it lacks: AreaInfo and template must read back changed
     u32s = lambda arr: sorted(struct.unpack(f'<{len(arr[1]) // 4}I', arr[1]))
@@ -2226,12 +2581,13 @@ def selftest(path):
     s.add_items(db, cont, old, 2)
     s.add_items(db, cont, new, 1)
     ships = s.ships(names)
-    hold = s.cargo(*ships[0][1:])
+    k = next(i for i, x in enumerate(ships) if len(s.cargo(*x[1:])) >= 3)  # a ship with three holds
+    hold = s.cargo(*ships[k][1:])
     ware = s.goods(names)[0]
-    s.set_cargo(ships[0][1], hold[0][0], ware, 99)
-    s.set_cargo(ships[0][1], hold[1][0], None, 0)
-    s.set_cargo(ships[0][1], hold[2][0], None, 0)
-    s.add_items(ships[0][1], None, new, 1, slot=hold[2][0])
+    s.set_cargo(ships[k][1], hold[0][0], ware, 99)
+    s.set_cargo(ships[k][1], hold[1][0], None, 0)
+    s.set_cargo(ships[k][1], hold[2][0], None, 0)
+    s.add_items(ships[k][1], None, new, 1, slot=hold[2][0])
     s.write(tmp)
     u = Save(tmp)
     _, db, cont = u.item_stores(names)[0]
@@ -2240,10 +2596,10 @@ def selftest(path):
     ism = db.path('GameSessionManager', 'ItemSessionManager')[0]
     last = struct.unpack('<q', db.tags(ism, 'ItemMap')[0][1][-2][1])[0]
     assert last & (1 << 58) - 1 == struct.unpack('<I', db.attr(ism, 'ItemIdCounter')[1])[0] and last >> 58, 'Item-ID'
-    hold = u.cargo(*u.ships(names)[0][1:])
+    hold = u.cargo(*u.ships(names)[k][1:])
     assert [(p, n) for _, p, n in hold][:3] == [(ware, 50), (None, 0), (-new, 1)], 'Fracht nicht übernommen'
     size = len(db.tags(ism, 'ItemMap')[0][1])
-    u.set_cargo(u.ships(names)[0][1], hold[2][0], None, 0)  # unloading an item unregisters it
+    u.set_cargo(u.ships(names)[k][1], hold[2][0], None, 0)  # unloading an item unregisters it
     assert len(db.tags(ism, 'ItemMap')[0][1]) == size - 2, 'Item im Laderaum nicht abgemeldet'
     assert sum(map(bool, names['itemtips'].values())) > len(names['itemtips']) // 2, 'Item-Tooltips'
     assert sum('★' in v for v in names['itemtips'].values()) > 30 and any(' ← ' in v for v in names['itemtips'].values()), 'Boost-Tooltips'
@@ -2297,6 +2653,46 @@ def selftest(path):
     assert version('v1.10.0') > version('1.9.2') > version('v1.9'), 'Versionsvergleich'
     groups = grouped(names, s.refs)
     assert sorted(k for *_, k in groups) == sorted(s.refs), 'Gruppierung verliert Einstellungen'
+    dorm = [k for k in s.refs if k.endswith(':Dormancy')]
+    assert dorm and all(len(label(names, k)[1]) == 3 and 0 <= s.setting(k) < 3 for k in dorm), 'Piraten an/aus'  # 0 = not yet shown up
+    for db in (s.data, s.setup, s.header, *(db for _, _, db in s.sessions)):  # attr_id's padding rule holds
+        d = db.dicts[db.aoff:]
+        n = struct.unpack_from('<I', d)[0]
+        p = 4 + 2 * n
+        for _ in range(n):
+            p = d.index(b'\0', p) + 1
+        assert len(d) == p + -p % 8 + 4, 'Namensverzeichnis'
+    # every pirate off, then on again: Disabled appears and goes (a new name where a session lacks it)
+    s = Save(path)
+    prof = [int(k.split(':')[1]) for k in dorm]
+    fleet = {(id(db), b[i:i + 8]) for p in prof for db, x in s.pirates(p) for n in ('Warships', 'LandTroops')
+             for b in [db.attr(x, n)[1]] for i in range(0, len(b), 8)}
+    for k in dorm:
+        s.set_setting(k, 2)
+
+    def left(db, n):  # attributes still naming a removed unit (other than what a sunk ship leaves, or goods amounts)
+        if type(n[1]) is list:
+            return sum(left(db, c) for c in n[1])
+        return db.name(n) not in ('TargetObjectID', 'LastAttackerID', 'StrgLrg', 'StrgSmll') and any((id(db), n[1][i:i + 8]) in fleet for i in range(0, len(n[1]) - 7, 4))
+    assert not sum(left(db, db.root) for _, _, db in s.sessions), 'Flotte nicht vollständig entfernt'
+    owners = {struct.pack('<i', p) for p in prof}
+    assert not [o for _, _, db in s.sessions for am in db.path('GameSessionManager', 'AreaManagers') for m in am[1]
+                if type(m[1]) is list for a in db.tags(m, 'AreaObjectManager') for g in db.tags(a, 'GameObject')
+                for y in db.tags(g, 'objects') for o in db.tags(y, 'None') if db.tags(o, 'Unit') and not db.tags(o, 'Building')
+                and (db.attr(o, 'OwnerProfile') or [0, b''])[1][:4] in owners], 'Gegner-Schiffe übrig (Minimap-Symbol)'
+    assert not [k for cp in s.data.path('MetaGameManager', 'ContractManager', 'ContractHandler', 'Data', 'None',
+                                        'ContractProviderData', 'Data') for k in cp[1][::2] if k[1] in owners], 'Gegner-Aufträge übrig'
+    s.write(tmp)
+    u = Save(tmp)
+    assert all(u.pirates(p) and all(db.attr(x, 'Disabled') for db, x in u.pirates(p)) for p in prof), 'Gegner aus'
+    assert not any(db.attr(x, n)[1] for p in prof for db, x in u.pirates(p) for n in ('Warships', 'LandTroops')), 'Flottenliste'
+    for k in dorm:
+        u.set_setting(k, 1)
+    u.write(tmp)
+    u = Save(tmp)
+    assert not any(db.attr(x, 'Disabled') for p in prof for db, x in u.pirates(p)), 'Gegner an'
+    os.remove(tmp)
+    print('Gegner:', len(prof), 'aus- und wieder eingeschaltet,', len(fleet), 'Kriegseinheiten entfernt')
     print(len({g[:2] for g in groups}), 'Gruppen:', ', '.join(dict.fromkeys(g[0] for g in groups)))
     print('Selbsttest OK')
 
