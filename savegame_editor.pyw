@@ -12,7 +12,7 @@ CACHE = os.path.join(DATA, 'namen_{}.json')  # game names per language
 PREFS = os.path.join(DATA, 'einstellungen.json')  # game folder, save folder, dark mode, language
 LANGS = {'de': ('Deutsch', 'german'), 'en': ('English', 'english')}  # code: (menu name, texts_<x>.xml)
 LANG = 'de'  # set by the window
-VERSION = '1.5.0'  # the GitHub release tag is 'v' + VERSION
+VERSION = '1.5.1'  # the GitHub release tag is 'v' + VERSION
 TITLE = f'Anno 117 Savegame-Editor {VERSION}'
 UPDATE_API = 'https://api.github.com/repos/Moepchi/anno117-savegame-editor/releases/latest'
 EXE = 'Anno117-Savegame-Editor.exe'  # release asset name
@@ -30,6 +30,14 @@ ALIAS = {'SetupTraderTraderPrices': 'TraderTradePrices',
 PIRATE = {'PirateRaidDifficulty': 'RaidDifficulty', 'PirateWarFleetDifficulty': 'WarFleetDifficulty',
           'PiratePatrolsDifficulty': 'PatrolDifficulty', 'PirateWarThreatsDifficulty': 'WarThreats',
           'PirateDormancyDifficultyUI': 'Dormancy'}
+# pirate setting -> (section, value) in a pirate asset's levels (Easy/Short, Medium, Hard/Far); Chase goes with the patrols
+PIRATE_TUNE = {'RaidDifficulty': ('Raids', 'RaidInterval'), 'WarThreats': ('WarThreats', 'TimeUntilNextWarThreat'),
+               'PatrolDifficulty': ('Patrols', 'StartPirateZoneRadius'), 'Chase': ('Patrols', 'ChaseRange')}
+# what a changed pirate setting does in a running game (status line)
+PIRATE_HINT = {'RaidDifficulty': 'Piraten: Der nächste Überfall ist verschoben, danach kommen sie im neuen Abstand.',
+               'WarThreats': 'Piraten: Die nächste Kriegsdrohung ist verschoben, danach kommen sie im neuen Abstand.',
+               'PatrolDifficulty': 'Piraten: Das Patrouillengebiet ist angepasst und wächst wie bisher mit deinem Fortschritt.',
+               'WarFleetDifficulty': 'Piraten: Gilt für Kriegsschiffe, die die Piraten ab jetzt bauen; vorhandene bleiben.'}
 # tab titles of the game's setup menu (SettingsMenu GUID -> LineId); assets.xml lists the menus but not their titles
 SECTIONS = {'150498': '-6914829576719174900', '50976': '-6913167428570173649', '51051': '-6909293900839592885',
             '51052': '-6909425974996756542', '51053': '-6909049289369605519'}
@@ -107,6 +115,14 @@ EN = {
     'Noch nicht erschienen': 'Not appeared yet',
     'Experimentell: Gegner nach Spielstart umgeschaltet, erst an einer Kopie testen.':
         'Experimental: opponent switched after game start, test on a copy first.',
+    'Piraten: Der nächste Überfall ist verschoben, danach kommen sie im neuen Abstand.':
+        'Pirates: the next raid has been moved, after that they come at the new interval.',
+    'Piraten: Die nächste Kriegsdrohung ist verschoben, danach kommen sie im neuen Abstand.':
+        'Pirates: the next war threat has been moved, after that they come at the new interval.',
+    'Piraten: Das Patrouillengebiet ist angepasst und wächst wie bisher mit deinem Fortschritt.':
+        'Pirates: the patrol zone has been adjusted and keeps growing with your progress as before.',
+    'Piraten: Gilt für Kriegsschiffe, die die Piraten ab jetzt bauen; vorhandene bleiben.':
+        'Pirates: applies to warships the pirates build from now on; existing ones stay.',
     'Anno 117 Spielstand': 'Anno 117 save game',
     'Lade Spielstand …': 'Loading save game …',
     'Geladen: {}': 'Loaded: {}',
@@ -135,9 +151,9 @@ EN = {
     'Gewöhnlich': 'Common', 'Ungewöhnlich': 'Uncommon', 'Selten': 'Rare', 'Episch': 'Epic', 'Legendär': 'Legendary',
     'Einzigartig': 'Unique', 'Mythisch': 'Mythic', 'Alle': 'All', 'Insel-Items': 'Island items',
     'Schiffs-Items': 'Ship items',
-    'Doppelklick legt Items ins Lager der Insel (eingelagert und ohne Wirkung, bis du sie im Spiel einsetzt).':
-        "Double-click puts items into the island's storage (stored and without effect until you use them in the game).",
-    'Wie viele „{}“ hinzufügen?': 'How many "{}" to add?',
+    'Doppelklick setzt die Anzahl eines Items im Lager der Insel (neue sind eingelagert und ohne Wirkung, bis du sie im Spiel einsetzt).':
+        "Double-click sets an item's count in the island's storage (new ones are stored and without effect until you use them in the game).",
+    'Wie viele „{}“ im Lager (0 entfernt alle)?': 'How many "{}" in storage (0 removes all)?',
     'Doppelklick belädt einen Laderaum mit Waren (höchstens 50) oder einem Item.':
         'Double-click loads a hold with goods (at most 50) or one item.',
     'Menge (höchstens 50):': 'Amount (at most 50):',
@@ -366,12 +382,40 @@ class Save:
     def setting(self, key):
         return struct.unpack('<H', self.refs[key][0][1][1])[0]
 
-    def set_setting(self, key, value):
+    def set_setting(self, key, value, pirates=None):
+        """pirates: names['pirates'], to carry a pirate difficulty over into what the game already scheduled."""
+        old = self.setting(key)
         for db, a in self.refs[key]:
             a[1] = struct.pack('<H', value)
             self.changed.add(db)
         if key.endswith(':Dormancy') and value in (1, 2):
             self.switch_pirate(int(key.split(':')[1]), value == 2)
+        if key.startswith('Pirate:') and pirates:
+            _, profile, field = key.split(':')
+            self.retune_pirate(int(profile), field, old, value, pirates.get(profile))
+
+    def retune_pirate(self, profile, field, old, new, tune):
+        """The game fixes some pirate values when they are set up: the next raid and war threat are already scheduled,
+        the patrol zone has its radius. These move by the difference between the old and the new level (taken from
+        the game's pirate assets). The war fleet factor only acts on ships built later, nothing to move there.
+        ponytail: derived from assets.xml and saves, not watched in-game; zone growth by unlocks is the same for all levels."""
+        vals = (tune or {}).get(field)
+        if not vals or not (0 <= old < 3 and 0 <= new < 3) or None in (vals[old], vals[new]):
+            return
+        d = vals[new] - vals[old]
+        for db, p in self.pirates(profile):
+            if field == 'PatrolDifficulty':
+                area, chase = db.tags(p, 'AreaOfActivity'), db.attr(p, 'ChaseRange')
+                r = area and db.attr(area[0], 'Radius')
+                if r and chase and tune['Chase'][new] is not None:
+                    radius = max(struct.unpack('<f', r[1])[0] + d, 0.)
+                    r[1], chase[1] = struct.pack('<f', radius), struct.pack('<f', radius + tune['Chase'][new])
+            else:
+                when = (db.attr(db.tags(p, 'NextRaidTime')[0], 'value') if field == 'RaidDifficulty' and db.tags(p, 'NextRaidTime')
+                        else db.attr(p, 'NextWarThreatTime') if field == 'WarThreats' else None)
+                if when and len(when[1]) == 8 and struct.unpack('<q', when[1])[0] > 0:  # 0 = nothing scheduled
+                    when[1] = struct.pack('<q', max(struct.unpack('<q', when[1])[0] + int(d), 1))
+            self.changed.add(db)
 
     def pirates(self, profile):
         """[(db, Pirate tag)] of one pirate's objects in the sessions."""
@@ -592,7 +636,8 @@ class Save:
             conds = [c for n in ids for c in trees.get((u32(n, 'StorylineID'), u32(n, 'ComponentGUID')), [])]
             guid = sum(u32(i, 'GUID') for i in db.tags(e, 'ID'))
             if conds:
-                out.append([names['quests'].get(str(guid), f'Quest {guid}'), conds])
+                name, summary = names['quests'].get(str(guid), [f'Quest {guid}', ''])
+                out.append([name, conds, summary])
         return out
 
     def quest_text(self, conds, names):
@@ -719,6 +764,29 @@ class Save:
             stack[1].append([1, [[A('ID'), iid], [A('GUID'), gb]]])
         self.changed.add(db)
 
+    @staticmethod
+    def unregister_items(db, ids):
+        """Drops items (their ID bytes) from the ItemMap."""
+        m = db.tags(db.path('GameSessionManager', 'ItemSessionManager')[0], 'ItemMap')[0]
+        m[1][:] = [x for k, v in zip(m[1][::2], m[1][1::2]) if k[1] not in ids for x in (k, v)]
+
+    def set_items(self, db, cont, guid, n):
+        """n items of a kind in an island's storage: adds new ones, or drops the last ones (stack and ItemMap);
+        an emptied stack leaves the SlotList (island storage has unlimited slots, none empty)."""
+        stack = self.item_stacks(db, cont).get(guid)
+        have = len(stack[1]) if stack else 0
+        if n > have:
+            return self.add_items(db, cont, guid, n - have)
+        if n == have:
+            return
+        self.unregister_items(db, {db.attr(i, 'ID')[1] for i in stack[1][n:]})
+        del stack[1][n:]
+        if not n:
+            for sl in db.tags(cont, 'SlotList'):
+                sl[1][:] = [x for x in sl[1] if not any(stack is y for st in db.tags(x, 'Stack')
+                                                        for v in db.tags(st, 'value') for y in db.tags(v, 'Stack'))]
+        self.changed.add(db)
+
     # ---------- ships: objects with ShipModuleOwner in the AreaManagers, cargo in ItemContainer/SlotContainer ----------
 
     def ships(self, names):
@@ -754,9 +822,7 @@ class Save:
             value = ([[A('ProductGUID'), struct.pack('<I', product)], [A('ProductCount'), struct.pack('<i', min(amount, 50))]]
                      if product and amount > 0 else [[A('UnitMetaObjectRef'), bytes(8)]])
             if db.attr(st, 'index')[1][0] == 2:  # items on board: drop them from the ItemMap too
-                gone = {db.attr(i, 'ID')[1] for i in db.tags(db.tags(st, 'value')[0], 'Stack')[0][1]}
-                m = db.tags(db.path('GameSessionManager', 'ItemSessionManager')[0], 'ItemMap')[0]
-                m[1][:] = [x for k, v in zip(m[1][::2], m[1][1::2]) if k[1] not in gone for x in (k, v)]
+                self.unregister_items(db, {db.attr(i, 'ID')[1] for i in db.tags(db.tags(st, 'value')[0], 'Stack')[0][1]})
             st[1][:] = [[A('index'), struct.pack('<q', 1 if len(value) == 2 else 3)], [T('value'), value]]
         except KeyError:
             raise ValueError(t('Diese Region hat noch nie Waren auf einem Schiff gesehen, hier kann der Editor keine laden.')) from None
@@ -867,11 +933,11 @@ def is_game_dir(path):
 def game_names(game, lang='de'):
     src = os.path.join(game, 'maindata', 'config.rda')
     # the editor version is part of the stamp: a newer editor may read more from the game files than an old cache holds
-    stamp, cache_file = [os.path.getmtime(src), VERSION], CACHE.format(lang)
+    stamp, cache_file = [os.path.getmtime(src), VERSION, 2], CACHE.format(lang)  # 2: bump when the cache gains a key
     try:
         with open(cache_file, encoding='utf-8') as f:
             cache = json.load(f)
-        if cache['stamp'] == stamp and 'techs' in cache:  # 1.5.0 test builds cached names without quests and techs
+        if cache['stamp'] == stamp:
             return cache
     except (OSError, ValueError, KeyError):
         pass
@@ -909,7 +975,12 @@ def game_names(game, lang='de'):
         tpl = tpl and tpl.group(1)
         q = tpl == 'QuestEntry' and re.search(r'<QuestName>(-?\d+)<', chunk)
         if q and texts.get(q.group(1)):
-            quests[g.group(1)] = texts[q.group(1)]  # the quest log's names
+            # the quest log's name and summary; a name the game fills at run time ({Static.…}, the pyramid project)
+            # gives way to the summary's first clause
+            m = re.search(r'<SummaryText>(-?\d+)<', chunk)
+            summary = texts.get(m.group(1), '') if m else ''
+            name = texts[q.group(1)]
+            quests[g.group(1)] = [re.split(r'[.:;,]', summary)[0] if '{' in name and summary else name, summary]
         q = tpl == 'Tech' and re.search(r'<TechName>(-?\d+)<', chunk)
         if q and texts.get(q.group(1)):
             techs[g.group(1)] = texts[q.group(1)]  # research names for quest texts
@@ -985,10 +1056,27 @@ def game_names(game, lang='de'):
     keys.update((k + 'Key', texts.get(v, '')) for k, v in re.findall(r'<(\w+)>\s*<Name>(-?\d+)</Name>', re.search(
         r'<NeedAttributeConfig>.*?</NeedAttributeConfig>', raw['assets'], re.S).group(0)))  # Prestige, Happiness, …
     itemtips = {g: item_tip(c, parts, assets, texts, keys) for g, c in item_chunks.items()}
+    pir = {g.group(1): c for c in raw['assets'].split('<Asset>') if '<Pirate>' in c for g in [re.search(r'<GUID>(\d+)</GUID>', c)] if g}
+
+    def tune(g, seen=()):  # a pirate's values per level, over those of its base asset
+        c = pir.get(g)
+        if not c or g in seen:
+            return {}
+        base = re.search(r'<BaseAssetGUID>(\d+)<', c)
+        out = json.loads(json.dumps(tune(base.group(1), seen + (g,)))) if base else {}
+        body = re.search(r'<Pirate>.*?</Pirate>', c, re.S).group(0)
+        for key, (sec, f) in PIRATE_TUNE.items():
+            m = re.search(rf'<{sec}>(.*?)</{sec}>', body, re.S)
+            for i, lv in enumerate(('Easy|Short', 'Medium', 'Hard|Far')):
+                v = m and re.search(rf'<({lv})>(?:(?!</\1>).)*?<{f}>([\d.]+)<', m.group(1), re.S)
+                if v:
+                    out.setdefault(key, [None] * 3)[i] = float(v.group(2))
+        return out
+    pirates = {g: tune(g) for g in pir}
     cache = {'stamp': stamp, 'texts': texts, 'assets': assets, 'descs': descs, 'settings': settings, 'menu': menu,
              'ferts': ferts, 'icons': icons, 'items': items, 'itemtips': itemtips, 'shipitems': shipitems,
              'shipmods': shipmods, 'modfx': modfx, 'products': products,
-             'quests': quests, 'techs': techs}
+             'quests': quests, 'techs': techs, 'pirates': pirates}
     os.makedirs(DATA, exist_ok=True)
     with open(cache_file, 'w', encoding='utf-8') as f:
         json.dump(cache, f, ensure_ascii=False)
@@ -1608,7 +1696,7 @@ def run_ui():
     itemtv = table(tab4, ('Item', 'Seltenheit', 'Anzahl'), (440, 160, 100))
     for r, c in RARITY_COLORS.items():  # mid tones, readable on light and dark
         itemtv.tag_configure(r, foreground=c)
-    tr(ttk.Label(tab4), 'Doppelklick legt Items ins Lager der Insel (eingelagert und ohne Wirkung, bis du sie im Spiel einsetzt).').pack(anchor='w')
+    tr(ttk.Label(tab4), 'Doppelklick setzt die Anzahl eines Items im Lager der Insel (neue sind eingelagert und ohne Wirkung, bis du sie im Spiel einsetzt).').pack(anchor='w')
 
     tab5 = ttk.Frame(nb, padding=6)
     nb.insert(2, tab5, text=t('Schiffe'))
@@ -1724,15 +1812,17 @@ def run_ui():
 
     def show_quests():
         questtv.delete(*questtv.get_children())
-        for i, (name, _) in enumerate(s['quests']):
+        for i, (name, *_) in enumerate(s['quests']):
             questtv.insert('', 'end', iid=str(i), values=(name,))
 
     def quest_info(row):
-        name, conds = s['quests'][int(row)]
+        name, conds, summary = s['quests'][int(row)]
         win = tk.Toplevel(root)
         win.title(name)
         win.transient(root)
         ttk.Label(win, text=name, font=bold).pack(anchor='w', padx=12, pady=(12, 0))
+        if summary:
+            ttk.Label(win, text=summary, wraplength=560, justify='left').pack(anchor='w', padx=12, pady=(12, 0))
         ttk.Label(win, text=s['save'].quest_text(conds, names) or t('Kein Questtext im Spielstand'), wraplength=560,
                   justify='left').pack(anchor='w', padx=12, pady=12)
         ttk.Button(win, text=t('Schließen'), command=win.destroy).pack(pady=(0, 12))
@@ -1784,12 +1874,13 @@ def run_ui():
 
     def add_item(g):
         _, db, cont = s['items'][isle.current()]
-        n = simpledialog.askinteger(TITLE, t('Wie viele „{}“ hinzufügen?').format(itemtv.set(g, 'Item')),
-                                    initialvalue=1, minvalue=1, maxvalue=99, parent=root)
-        if not n:
+        have = itemtv.set(g, 'Anzahl')
+        n = simpledialog.askinteger(TITLE, t('Wie viele „{}“ im Lager (0 entfernt alle)?').format(itemtv.set(g, 'Item')),
+                                    initialvalue=have or 1, minvalue=0, maxvalue=99, parent=root)
+        if n is None or str(n) == str(have or 0):
             return
         try:
-            s['save'].add_items(db, cont, int(g), n)
+            s['save'].set_items(db, cont, int(g), n)
         except ValueError as e:
             status.set(str(e))
             return
@@ -2191,10 +2282,12 @@ def run_ui():
         else:
             nv = simpledialog.askinteger(TITLE, t('{} (Rohwert)').format(key) + ':', initialvalue=v, minvalue=0, maxvalue=65535, parent=root)
         if nv is not None and nv != v:
-            s['save'].set_setting(key, nv)
+            s['save'].set_setting(key, nv, names['pirates'])
             dirty()
             if key.endswith(':Dormancy'):
                 status.set(t('Experimentell: Gegner nach Spielstart umgeschaltet, erst an einer Kopie testen.'))
+            elif key.split(':')[-1] in PIRATE_HINT:
+                status.set(t(PIRATE_HINT[key.split(':')[-1]]))
             sets.item(key, values=(value_text(key),))
             resort(sets, sets.parent(key))
 
@@ -2544,13 +2637,13 @@ def selftest(path):
     # quests: end the first open one; below its root every condition reads back met, the root stays active
     quests = t.quests(names)
     if quests:
-        assert all(not n.startswith('Quest ') for n, _ in quests), 'Questname fehlt'
-        assert all('{' not in t.quest_text(c, names) for _, c in quests), 'Platzhalter im Questtext'
-        assert sum(bool(t.quest_text(c, names)) for _, c in quests) > len(quests) // 2, 'Questtexte fehlen'
+        assert all(not n.startswith('Quest ') and '{' not in n for n, *_ in quests), 'Questname fehlt'
+        assert all('{' not in t.quest_text(c, names) for _, c, _ in quests), 'Platzhalter im Questtext'
+        assert sum(bool(t.quest_text(c, names)) for _, c, _ in quests) > len(quests) // 2, 'Questtexte fehlen'
         t.end_quest(quests[0][1])
         t.write(tmp)
         back = Save(tmp)
-        conds = dict(back.quests(names))[quests[0][0]]
+        conds = {n: c for n, c, _ in back.quests(names)}[quests[0][0]]
         state = [(bool(back.data.attr(c, 'IsResolved')), bool(back.data.attr(c, 'IsActive'))) for c in conds]
         assert state.count((False, True)) == 1 and state.count((True, False)) == len(state) - 1, state
     print(len(quests), 'offene Quests, eine beendet')
@@ -2601,10 +2694,19 @@ def selftest(path):
     size = len(db.tags(ism, 'ItemMap')[0][1])
     u.set_cargo(u.ships(names)[k][1], hold[2][0], None, 0)  # unloading an item unregisters it
     assert len(db.tags(ism, 'ItemMap')[0][1]) == size - 2, 'Item im Laderaum nicht abgemeldet'
+    slots = len(u.slots(db, cont))
+    u.set_items(db, cont, old, have[old])  # back down by two, the new kind removed completely
+    u.set_items(db, cont, new, 0)
+    assert len(db.tags(ism, 'ItemMap')[0][1]) == size - 8, 'Entfernte Items nicht abgemeldet'
+    u.write(tmp)
+    u = Save(tmp)
+    _, db, cont = u.item_stores(names)[0]
+    got = {g: len(x[1]) for g, x in u.item_stacks(db, cont).items()}
+    assert got == have and len(u.slots(db, cont)) == slots - 1, 'Items nicht entfernt'
     assert sum(map(bool, names['itemtips'].values())) > len(names['itemtips']) // 2, 'Item-Tooltips'
     assert sum('★' in v for v in names['itemtips'].values()) > 30 and any(' ← ' in v for v in names['itemtips'].values()), 'Boost-Tooltips'
     assert 50 < len(names['shipitems']) < len(names['items']) // 2, 'Schiffs-Items'
-    print(lab, 'Items +3,', len(ships), 'Schiffe, Fracht gesetzt')
+    print(lab, 'Items +3 und wieder -3,', len(ships), 'Schiffe, Fracht gesetzt')
     # modules: every ship as found keeps to the rules; a buffed module out (its effect goes), one buffed and one weapon in
     s = Save(path)
     kind = lambda db, o: names['shipmods'].get(str(struct.unpack('<i', db.attr(o, 'guid')[1][:4])[0]))
@@ -2662,9 +2764,32 @@ def selftest(path):
         for _ in range(n):
             p = d.index(b'\0', p) + 1
         assert len(d) == p + -p % 8 + 4, 'Namensverzeichnis'
+    # pirate difficulties: scheduled raid/war threat and the patrol zone move by the asset difference
+    prof = [int(k.split(':')[1]) for k in dorm]
+    assert all(None not in names['pirates'][str(p)][f] for p in prof for f in PIRATE_TUNE), 'Piraten-Werte aus den Spieldaten'
+    s = Save(path)
+
+    def tuned(sv):
+        return [(struct.unpack('<q', db.attr(db.tags(x, 'NextRaidTime')[0], 'value')[1])[0] if db.tags(x, 'NextRaidTime') and db.attr(db.tags(x, 'NextRaidTime')[0], 'value') else 0,
+                 struct.unpack('<q', db.attr(x, 'NextWarThreatTime')[1])[0] if db.attr(x, 'NextWarThreatTime') else 0,
+                 struct.unpack('<f', db.attr(db.tags(x, 'AreaOfActivity')[0], 'Radius')[1])[0], struct.unpack('<f', db.attr(x, 'ChaseRange')[1])[0])
+                for p in prof for db, x in sv.pirates(p)]
+    before, want = tuned(s), []
+    for p in prof:
+        tune, lv = names['pirates'][str(p)], {f: s.setting(f'Pirate:{p}:{f}') for f in ('RaidDifficulty', 'WarThreats', 'PatrolDifficulty')}
+        new = {f: (v + 1) % 3 for f, v in lv.items()}
+        for f in new:
+            s.set_setting(f'Pirate:{p}:{f}', new[f], names['pirates'])
+        for raid, threat, radius, _ in before[len(want):len(want) + len(s.pirates(p))]:
+            d = lambda f: tune[f][new[f]] - tune[f][lv[f]]
+            r = max(radius + d('PatrolDifficulty'), 0)
+            want.append((raid and max(raid + int(d('RaidDifficulty')), 1), threat and max(threat + int(d('WarThreats')), 1), r, r + tune['Chase'][new['PatrolDifficulty']]))
+    s.write(tmp)
+    got = tuned(Save(tmp))
+    assert all(a[:2] == b[:2] and abs(a[2] - b[2]) < .01 and abs(a[3] - b[3]) < .01 for a, b in zip(got, want)) and len(got) == len(want), 'Piraten-Schwierigkeit nachgezogen'
+    print('Piraten-Schwierigkeit:', sum(1 for x in before if x[0]), 'geplante Überfälle,', sum(1 for x in before if x[1]), 'Kriegsdrohungen,', len(before), 'Gebiete verschoben')
     # every pirate off, then on again: Disabled appears and goes (a new name where a session lacks it)
     s = Save(path)
-    prof = [int(k.split(':')[1]) for k in dorm]
     fleet = {(id(db), b[i:i + 8]) for p in prof for db, x in s.pirates(p) for n in ('Warships', 'LandTroops')
              for b in [db.attr(x, n)[1]] for i in range(0, len(b), 8)}
     for k in dorm:
